@@ -7,3 +7,9 @@ bin/cache
 /tfwm/data
 /tfwm/bin/cache
 /tfwm/bin/config.py
+
+# New client/server apps
+/backend/node_modules
+/frontend/node_modules
+/backend/.env
+/frontend/.env
