@@ -77,3 +77,70 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+
+Rework status: decoupled client/server architecture
+===================================================
+
+The legacy map files remain unchanged for safe comparison while a new architecture is being introduced.
+
+New apps
+--------
+- `/home/runner/work/watch-london-move/watch-london-move/backend` - TfL data aggregator and WebSocket streamer
+- `/home/runner/work/watch-london-move/watch-london-move/frontend` - WebGL renderer (MapLibre + deck.gl scenegraph models)
+
+Unified vehicle schema contract
+-------------------------------
+Backend payloads include:
+- `schema`: `["id", "type", "line_name", "lat", "lon", "heading"]`
+- `vehicles`: array of tuples matching that schema
+- `details`: destination and route metadata per id
+
+Backend features
+----------------
+- Continuous polling for configured bus and train lines
+- Retry/backoff and simple cache windows to reduce duplicate TfL calls
+- In-memory latest-state keyed by vehicle id
+- Heading recalculation from movement trajectory
+- `GET /health` for metrics (poll latency/errors/client count)
+- `GET /snapshot` for debugging unified state
+- Socket.io events:
+  - `vehicles:full`
+  - `vehicles:delta`
+
+Frontend features
+-----------------
+- MapLibre canvas with deck.gl scenegraph layers
+- `.gltf` low-poly placeholder models in `/frontend/public/models/`
+- WebSocket subscription to backend stream
+- Client-side interpolation between updates to avoid teleporting
+- Rotation driven by heading
+- Floating filter toggles for transport groups
+- Vehicle click interaction showing destination + highlighted recent route trace
+
+Phase-gated delivery alignment
+------------------------------
+- Phase 1: backend polling, normalization, health/snapshot endpoints
+- Phase 2: frontend map canvas + streamed coordinate plotting
+- Phase 3: `.gltf` vehicle models + heading orientation
+- Phase 4: interpolation polish + filters + interaction
+
+Local run
+---------
+1. Backend
+   - `cd /home/runner/work/watch-london-move/watch-london-move/backend`
+   - `cp .env.example .env`
+   - set `TFL_APP_ID` and `TFL_APP_KEY` if available
+   - `npm install`
+   - `npm run dev`
+2. Frontend
+   - `cd /home/runner/work/watch-london-move/watch-london-move/frontend`
+   - `cp .env.example .env`
+   - `npm install`
+   - `npm run dev`
+
+Safe defaults
+-------------
+- Poll interval: 15s
+- Emit interval: 10s
+- Cache windows: 10s bus/train
+- Retry: 3 attempts, exponential backoff from 1s
