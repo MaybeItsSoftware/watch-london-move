@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl, { GeoJSONSource } from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
+import type { GeoJSONSource } from 'maplibre-gl';
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { ScenegraphLayer } from '@deck.gl/mesh-layers';
 import { io, Socket } from 'socket.io-client';
@@ -34,6 +35,8 @@ type RenderVehicle = {
   updatedAt: number;
 };
 
+type FilterKey = 'bus' | 'tube' | 'overground' | 'dlr' | 'tram' | 'elizabeth';
+
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4010';
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || BACKEND_URL;
 const INTERPOLATION_MS = Number(import.meta.env.VITE_INTERPOLATION_MS || 12000);
@@ -66,7 +69,7 @@ function App() {
   const historyRef = useRef<Map<string, [number, number][]>>(new Map());
 
   const [tick, setTick] = useState(0);
-  const [filters, setFilters] = useState<Record<string, boolean>>({
+  const [filters, setFilters] = useState<Record<FilterKey, boolean>>({
     bus: true,
     tube: true,
     overground: true,
@@ -87,7 +90,6 @@ function App() {
       center: [-0.1276, 51.5072],
       zoom: 10,
       pitch: 55,
-      antialias: true,
     });
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -132,7 +134,9 @@ function App() {
       for (const vehicle of parsePayload(payload)) {
         const key = vehicle.id;
         const previous = vehicleStateRef.current.get(key);
-        const from = previous ? previous.to : [vehicle.lon, vehicle.lat, previous?.to[2] ?? vehicle.heading] as [number, number, number];
+        const from: [number, number, number] = previous
+          ? previous.to
+          : [vehicle.lon, vehicle.lat, vehicle.heading];
         const next: RenderVehicle = {
           id: key,
           type: vehicle.type,
@@ -175,7 +179,7 @@ function App() {
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
-  const categories = useMemo(
+  const categories = useMemo<Record<FilterKey, string[]>>(
     () => ({
       bus: ['bus'],
       tube: ['bakerloo', 'central', 'circle', 'district', 'hammersmith-city', 'jubilee', 'metropolitan', 'northern', 'piccadilly', 'victoria', 'waterloo-city'],
@@ -188,20 +192,26 @@ function App() {
   );
 
   const vehicleRows = useMemo(() => {
+    const tickMarker = tick;
+    void tickMarker;
     const now = Date.now();
-    return [...vehicleStateRef.current.values()].filter((vehicle) => {
-      return Object.entries(filters).some(([group, enabled]) => enabled && categories[group].includes(vehicle.type));
-    }).map((vehicle) => {
+    return [...vehicleStateRef.current.values()]
+      .filter((vehicle) => {
+        return (Object.entries(filters) as [FilterKey, boolean][]).some(
+          ([group, enabled]) => enabled && categories[group].includes(vehicle.type),
+        );
+      })
+      .map((vehicle) => {
       const t = Math.min((now - vehicle.updatedAt) / INTERPOLATION_MS, 1);
       const lon = vehicle.from[0] + (vehicle.to[0] - vehicle.from[0]) * t;
       const lat = vehicle.from[1] + (vehicle.to[1] - vehicle.from[1]) * t;
       const heading = vehicle.from[2] + (vehicle.to[2] - vehicle.from[2]) * t;
       return {
         ...vehicle,
-        position: [lon, lat, 0],
+        position: [lon, lat, 0] as [number, number, number],
         heading,
       };
-    });
+      });
   }, [categories, filters, tick]);
 
   useEffect(() => {
@@ -246,7 +256,7 @@ function App() {
     <div className="app-shell">
       <div className="map" ref={mapContainerRef} />
       <div className="controls">
-        {Object.keys(filters).map((filter) => (
+        {(Object.keys(filters) as FilterKey[]).map((filter) => (
           <button
             key={filter}
             className={filters[filter] ? 'active' : ''}
