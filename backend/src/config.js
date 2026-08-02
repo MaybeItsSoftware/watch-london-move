@@ -15,10 +15,11 @@ const trainLines = parseCsv(
 );
 
 const busLines = parseCsv(process.env.TFL_BUS_LINES || '11,12,24,29,38,55,73,390');
+const corsOrigins = parseCsv(process.env.CORS_ORIGIN || 'http://localhost:5173');
 
 module.exports = {
   port: Number(process.env.PORT || 4010),
-  corsOrigin: process.env.CORS_ORIGIN || '*',
+  corsOrigins,
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 15000),
   emitIntervalMs: Number(process.env.EMIT_INTERVAL_MS || 10000),
   busCacheWindowMs: Number(process.env.BUS_CACHE_WINDOW_MS || 10000),

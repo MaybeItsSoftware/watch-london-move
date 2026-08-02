@@ -13,12 +13,28 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: config.corsOrigin,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Origin not allowed by CORS'));
+    },
     methods: ['GET', 'POST'],
   },
 });
 
-app.use(cors({ origin: config.corsOrigin }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Origin not allowed by CORS'));
+    },
+  }),
+);
 
 const store = new StateStore();
 const tfl = new TflClient(config);
@@ -30,6 +46,11 @@ const metrics = {
   lastPollAt: null,
   connectedClients: 0,
 };
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  return config.corsOrigins.includes(origin);
+}
 
 function toResponsePayload(vehicles) {
   const tuples = vehicles.map(toTuple).filter(validateTuple);
@@ -54,6 +75,7 @@ app.get('/health', (_req, res) => {
     config: {
       pollIntervalMs: config.pollIntervalMs,
       emitIntervalMs: config.emitIntervalMs,
+      corsOrigins: config.corsOrigins,
       busLines: config.busLines.length,
       trainLines: config.trainLines.length,
     },
