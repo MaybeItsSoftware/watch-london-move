@@ -4,6 +4,9 @@
   "description": "Streaming TfL data aggregator for watch-london-move",
   "main": "src/server.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
