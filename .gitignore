@@ -1,12 +1,13 @@
+# Legacy 2010 site (archived under legacy/, tagged legacy-php-site)
 *.pyc
-data/all-buses.json
-data/london.json
-data/london-text.json
-schematic/data
-bin/cache
-/tfwm/data
-/tfwm/bin/cache
-/tfwm/bin/config.py
+/legacy/data/all-buses.json
+/legacy/data/london.json
+/legacy/data/london-text.json
+/legacy/schematic/data
+/legacy/bin/cache
+/legacy/tfwm/data
+/legacy/tfwm/bin/cache
+/legacy/tfwm/bin/config.py
 
 # New client/server apps
 /backend/node_modules
