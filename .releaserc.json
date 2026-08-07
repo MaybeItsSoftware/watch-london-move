@@ -1,0 +1,34 @@
+{
+  "branches": ["main", "master"],
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "bash scripts/set-app-version.sh \"${nextRelease.version}\""
+      }
+    ],
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "CHANGELOG.md",
+          "package.json",
+          "frontend/package.json",
+          "frontend/package-lock.json",
+          "frontend/ios/App/App.xcodeproj/project.pbxproj",
+          "frontend/android/app/build.gradle"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    "@semantic-release/github"
+  ]
+}
