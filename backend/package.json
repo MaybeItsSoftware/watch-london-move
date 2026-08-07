@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
-    "smoke": "node -e \"const {validateTuple}=require('./src/schema'); if(!validateTuple(['a','bus','1',1,1,0])) process.exit(1); console.log('schema smoke ok')\""
+    "smoke": "node -e \"const {validateTuple}=require('./src/schema'); if(!validateTuple(['a',0,'1',1,1,0,0,null])) process.exit(1); console.log('schema smoke ok')\"",
+    "smoke:server": "node scripts/smoke.js"
   },
   "dependencies": {
     "axios": "^1.19.0",
@@ -16,5 +17,8 @@
     "express": "^5.2.1",
     "pino": "^10.3.1",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }

@@ -1,0 +1,51 @@
+# Fly is the reasonable managed option here: $0.02/GB egress, roughly a fifth of
+# hyperscaler pricing, on a workload that is almost entirely egress. A plain
+# Hetzner/OVH VPS with bundled bandwidth is cheaper again — see DEPLOY.md.
+app = "watch-london-move"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4010"
+  # Whole-network bus feed; see config.js.
+  TFL_BUS_LINES = ""
+  # Browser origins only — the Capacitor WebView origins the native apps use are
+  # always allowed (see config.js). Set this to the web frontend's origin once
+  # it has one; it otherwise defaults to the Vite dev server.
+  # CORS_ORIGIN = "https://watchlondonmove.example"
+
+[http_service]
+  internal_port = 4010
+  force_https = true
+  # This is a stateful poller holding an in-memory fleet and live WebSockets.
+  # Scaling to zero would drop every connection and restart the TfL polling
+  # cycle from cold, so the machine stays up.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    # Fan-out is single-threaded; past a few hundred sockets the TLS and write
+    # work saturates one core. Shard rather than stacking more onto a machine.
+    soft_limit = 300
+    hard_limit = 400
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "60s"
+  method = "GET"
+  path = "/health"
+
+[mounts]
+  source = "cache"
+  destination = "/app/.cache"
+
+[[vm]]
+  # The whole-network bus feed inflates from ~8MB gzipped to ~70MB of JSON on
+  # every parse, so the headroom matters more than the core count.
+  size = "shared-cpu-2x"
+  memory = "4gb"

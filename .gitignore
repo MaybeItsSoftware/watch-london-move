@@ -12,4 +12,15 @@ bin/cache
 /backend/node_modules
 /frontend/node_modules
 /backend/.env
+/backend/.env.*
+!/backend/.env.example
 /frontend/.env
+/frontend/.env.*
+!/frontend/.env.example
+!/frontend/.env.production
+/backend/.cache
+
+# The Capacitor ios/ and android/ trees are source and are committed. Their
+# build output, copied web assets and per-machine state are covered by the
+# .gitignore Capacitor generates inside each of them.
+/frontend/dist

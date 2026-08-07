@@ -1,3 +1,5 @@
+const { isOvergroundLine } = require('./lines');
+
 const STATION_REPLACEMENTS = [
   [/^Heathrow$/, 'Heathrow Terminals 1, 2, 3'],
   [/^Olympia$/, 'Kensington (Olympia)'],
@@ -33,7 +35,7 @@ function canonicalizeStationName(input, line) {
     station = station.replaceAll(from, to);
   });
 
-  if (!station.endsWith('Station') && !['tram', 'dlr', 'london-overground', 'elizabeth'].includes(line)) {
+  if (!station.endsWith('Station') && !['tram', 'dlr', 'elizabeth'].includes(line) && !isOvergroundLine(line)) {
     station = `${station} Station`;
   }
 
