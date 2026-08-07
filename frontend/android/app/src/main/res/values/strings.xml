@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Watch London Move</string>
+    <string name="title_activity_main">Watch London Move</string>
+    <string name="package_name">com.maybeitssoftware.watchlondonmove</string>
+    <string name="custom_url_scheme">com.maybeitssoftware.watchlondonmove</string>
+</resources>
