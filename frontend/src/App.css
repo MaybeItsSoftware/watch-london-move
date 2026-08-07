@@ -1,3 +1,26 @@
+:root {
+  --bg: #0b0f1a;
+  --panel: rgba(15, 20, 34, 0.82);
+  --panel-border: rgba(148, 163, 184, 0.18);
+  --panel-hover: rgba(30, 39, 61, 0.9);
+  --text: #e6eaf2;
+  --text-dim: #94a3b8;
+  --accent: #38bdf8;
+  --radius: 12px;
+  --status-connected: #4ade80;
+  --status-reconnecting: #fbbf24;
+  --status-disconnected: #f87171;
+
+  /* Inset every floating panel from the window edge. The env() terms are zero
+     in a browser and non-zero in the native shell, where index.html sets
+     viewport-fit=cover — without them the panels sit under the notch, the
+     status bar and the home indicator. */
+  --edge-top: calc(12px + env(safe-area-inset-top, 0px));
+  --edge-right: calc(12px + env(safe-area-inset-right, 0px));
+  --edge-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  --edge-left: calc(12px + env(safe-area-inset-left, 0px));
+}
+
 :root,
 html,
 body,
@@ -5,7 +28,28 @@ body,
   margin: 0;
   width: 100%;
   height: 100%;
-  font-family: Inter, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  /* The map owns every gesture. Without these the WebView rubber-bands the
+     whole page on a pan that starts near an edge, and flashes a grey box over
+     each tap. */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ...except real text entry, which still needs selection and the caret. */
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .app-shell {
@@ -19,42 +63,486 @@ body,
   height: 100%;
 }
 
-.controls {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  z-index: 10;
+/* Shared translucent panel treatment */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  color: var(--text);
 }
 
-.controls button {
-  background: rgba(15, 23, 42, 0.85);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  padding: 6px 10px;
-  text-transform: capitalize;
+/* Sidebar */
+.sidebar {
+  position: absolute;
+  top: var(--edge-top);
+  left: var(--edge-left);
+  bottom: var(--edge-bottom);
+  z-index: 10;
+  width: min(300px, calc(100% - var(--edge-left) - var(--edge-right)));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.sidebar-reopen {
+  position: absolute;
+  top: var(--edge-top);
+  left: var(--edge-left);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
 
-.controls button.active {
-  background: #ef4444;
+.sidebar-reopen:hover {
+  background: var(--panel-hover);
 }
 
-.status {
-  position: absolute;
-  bottom: 12px;
-  left: 12px;
-  z-index: 10;
-  background: rgba(15, 23, 42, 0.85);
-  color: #fff;
-  padding: 10px 12px;
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
   border-radius: 8px;
-  min-width: 260px;
+  border: 1px solid var(--panel-border);
+  background: rgba(8, 12, 22, 0.6);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
 }
 
-.status p {
-  margin: 2px 0;
+.sidebar-search::placeholder {
+  color: var(--text-dim);
+}
+
+.sidebar-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sidebar-search::-webkit-search-cancel-button {
+  filter: invert(0.7);
+}
+
+.mode-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+/* Line / bus route list */
+.line-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  border-top: 1px solid var(--panel-border);
+  padding-top: 8px;
+}
+
+.line-empty {
+  margin: 8px 2px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.line-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.line-row:hover {
+  background: var(--panel-hover);
+}
+
+.line-row.selected {
+  color: var(--text);
+  background: var(--panel-hover);
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.line-swatch {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.line-label {
+  flex: 1;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-group {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.line-count {
+  min-width: 3ch;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend-pill {
+  display: inline-flex;
+  font-family: inherit;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.legend-pill:hover {
+  background: var(--panel-hover);
+}
+
+.legend-pill.active {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.legend-pill:not(.active) .legend-swatch {
+  opacity: 0.25;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 11px;
+  min-width: 3ch;
+  text-align: right;
+}
+
+.legend-pill.active .legend-count {
+  color: var(--text);
+}
+
+/* Generic pill button (routes toggle, follow) */
+.pill-button {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.pill-button:hover {
+  background: var(--panel-hover);
+}
+
+.pill-button.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Info panel */
+.info-panel {
+  position: absolute;
+  right: var(--edge-right);
+  bottom: var(--edge-bottom);
+  z-index: 10;
+  padding: 12px 14px;
+  min-width: 260px;
+  max-width: min(340px, calc(100% - var(--edge-left) - var(--edge-right)));
+}
+
+.info-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-chip {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  flex: none;
+}
+
+.info-line {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.info-destination {
+  color: var(--text-dim);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.icon-button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.info-next {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.countdown {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.info-age {
+  margin: 4px 0 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status bar */
+.status-bar {
+  position: absolute;
+  bottom: var(--edge-bottom);
+  left: var(--edge-left);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+/* Clear of the sidebar: its left edge, plus its 300px width, plus a gap. */
+.status-bar.shifted {
+  left: min(calc(var(--edge-left) + 312px), calc(100% - var(--edge-right)));
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.status-dot.connected {
+  background: var(--status-connected);
+  box-shadow: 0 0 6px var(--status-connected);
+}
+
+.status-dot.reconnecting {
+  background: var(--status-reconnecting);
+  box-shadow: 0 0 6px var(--status-reconnecting);
+}
+
+.status-dot.disconnected {
+  background: var(--status-disconnected);
+  box-shadow: 0 0 6px var(--status-disconnected);
+}
+
+.status-label {
+  color: var(--text-dim);
+}
+
+.status-count,
+.status-age {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.status-count {
+  color: var(--text);
+}
+
+/* On narrow screens the sidebar can't share the row with anything else. */
+@media (max-width: 640px) {
+  .sidebar {
+    bottom: auto;
+    max-height: min(60vh, calc(100% - var(--edge-top) - var(--edge-bottom)));
+  }
+
+  .status-bar.shifted {
+    left: var(--edge-left);
+  }
+
+  /* MapLibre shows the attribution expanded until the first map interaction,
+     and on a narrow screen it wraps to two lines spanning the full width.
+     Clear it rather than cover it — the credit is a condition of the tile
+     licence. Stacking upwards: attribution, status bar, info panel. */
+  .status-bar {
+    bottom: calc(var(--edge-bottom) + 52px);
+  }
+
+  .info-panel {
+    bottom: calc(var(--edge-bottom) + 94px);
+  }
+}
+
+/* Touch input. Scoped to coarse pointers so the desktop layout is untouched:
+   the sizes below are the 44pt iOS / 48dp Android minimums, which look padded
+   and wasteful under a mouse. */
+@media (pointer: coarse) {
+  .line-row {
+    min-height: 44px;
+    padding: 8px;
+  }
+
+  .icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .legend-pill,
+  .pill-button {
+    min-height: 36px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .sidebar-reopen {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .link-button {
+    padding: 8px 0;
+  }
+
+  /* Four blurred panels compositing over a live WebGL map costs real frames on
+     a mid-range phone. Opaque backgrounds get the same legibility for free. */
+  .panel,
+  .legend-pill,
+  .pill-button {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #121826;
+  }
+
+  .legend-pill.active,
+  .pill-button:not(.active) {
+    background: #121826;
+  }
+
+  .pill-button.active {
+    background: var(--accent);
+  }
+}
+
+/* MapLibre's own controls use fixed 10px margins and would sit under the notch
+   in the native shell just as our panels would. */
+.maplibregl-ctrl-top-left {
+  padding: env(safe-area-inset-top, 0px) 0 0 env(safe-area-inset-left, 0px);
+}
+
+.maplibregl-ctrl-top-right {
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 0;
+}
+
+.maplibregl-ctrl-bottom-left {
+  padding: 0 0 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.maplibregl-ctrl-bottom-right {
+  padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) 0;
 }

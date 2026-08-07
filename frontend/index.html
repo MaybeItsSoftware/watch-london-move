@@ -3,8 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) non-zero in the
+         native shell. user-scalable=no stops the WebView's own pinch-zoom from
+         fighting MapLibre's gesture handling. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="Live 3D map of London's buses, trains and trams moving across the city in real time."
+    />
+    <meta name="theme-color" content="#0b0f1a" />
+    <title>Watch London Move</title>
   </head>
   <body>
     <div id="root"></div>
