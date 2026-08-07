@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Watch London Move</string>
     <string name="title_activity_main">Watch London Move</string>
-    <string name="package_name">com.maybeitssoftware.watchlondonmove</string>
-    <string name="custom_url_scheme">com.maybeitssoftware.watchlondonmove</string>
+    <string name="package_name">uk.co.maybeitssoftware.watchlondonmove</string>
+    <string name="custom_url_scheme">uk.co.maybeitssoftware.watchlondonmove</string>
 </resources>

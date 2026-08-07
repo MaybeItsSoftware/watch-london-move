@@ -1,7 +1,10 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.maybeitssoftware.watchlondonmove',
+  // Store-facing app identity, following the maybeitssoftware convention
+  // (uk.co.…, matching open-parliament). Must stay in sync with the match
+  // provisioning profile and the Play packageName — see RELEASING.md.
+  appId: 'uk.co.maybeitssoftware.watchlondonmove',
   appName: 'Watch London Move',
   // The Vite build, unmodified. `npx cap sync` copies it into both platforms.
   webDir: 'dist',

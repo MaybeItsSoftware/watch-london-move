@@ -1,14 +1,36 @@
 apply plugin: 'com.android.application'
 
+// Semantic-release owns the version: scripts/set-app-version.sh (run by the
+// Release workflow) rewrites appVersionName. Store uploads need a strictly
+// increasing versionCode, so CI passes the workflow run number via
+// -PbuildNumber (see fastlane/Fastfile); the fallback derives from the
+// version name (M*10000 + m*100 + p), matching set-app-version.sh.
+def appVersionName = "0.0.0"
+def versionParts = appVersionName.tokenize('.')
+def appVersionCode = project.hasProperty('buildNumber')
+        ? project.property('buildNumber').toInteger()
+        : Math.max(versionParts[0].toInteger() * 10000 + versionParts[1].toInteger() * 100 + versionParts[2].toInteger(), 1)
+
+// CI writes key.properties (android/key.properties) from repo secrets; local
+// dev falls back to debug signing. Same model as open-parliament.
+def keystorePropertiesFile = rootProject.file('key.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
+    // The store-facing applicationId follows the maybeitssoftware convention
+    // (uk.co.…, like open-parliament); the code namespace predates it and is
+    // not user-visible, so it stays put.
     namespace = "com.maybeitssoftware.watchlondonmove"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.maybeitssoftware.watchlondonmove"
+        applicationId "uk.co.maybeitssoftware.watchlondonmove"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +38,19 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+            }
+        }
+    }
     buildTypes {
         release {
+            signingConfig keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
