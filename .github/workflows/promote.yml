@@ -1,0 +1,64 @@
+name: Promote to Production
+
+# Manual trigger only. Run this after you've QA'd a TestFlight/internal build
+# and are ready to submit it for App Store review and go live on Play Store.
+#
+# Inputs:
+#   version — the semver tag to promote, e.g. v0.2.0. The iOS lane uses this
+#             to target the correct App Store Connect version; Android promotes
+#             whatever is currently on the internal track.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote (e.g. v0.2.0)'
+        required: true
+
+jobs:
+  # ─── iOS: submit the TestFlight build to App Store review ───
+  promote-ios:
+    name: iOS → App Store review
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Set up Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Submit to App Store review
+        run: bundle exec fastlane ios release
+        env:
+          VERSION: ${{ inputs.version }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+
+  # ─── Android: promote from internal track → production ───
+  promote-android:
+    name: Android → Play production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Set up Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Promote internal → production
+        run: bundle exec fastlane android promote
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}

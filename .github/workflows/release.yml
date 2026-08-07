@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  # Gate: tests must pass before semantic-release creates any tag.
+  test:
+    name: Pre-release checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Backend smoke test
+        run: npm ci && npm run smoke
+        working-directory: backend
+
+      - name: Frontend lint + build
+        run: npm ci && npm run lint && npm run build
+        working-directory: frontend
+
+  release:
+    name: Release
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # semantic-release needs full history to find the last tag
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: Verify a reachable release tag exists
+        # semantic-release silently releases 1.0.0 (ignoring commit types) when it
+        # can't find any reachable vX.Y.Z tag — this bit open-parliament twice.
+        # Fail loudly instead so a lost/deleted tag is caught here, not discovered
+        # after a wrong version ships. The v0.1.0 baseline tag was created at
+        # pipeline setup (see RELEASING.md).
+        run: |
+          if ! git tag --merged HEAD | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::No reachable vX.Y.Z tag found in history — semantic-release would default to 1.0.0 instead of bumping from the real baseline. Fix the tags before merging (see RELEASING.md troubleshooting)."
+            exit 1
+          fi
+
+      - name: Run Semantic Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release

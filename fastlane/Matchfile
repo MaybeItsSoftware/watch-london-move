@@ -1,0 +1,8 @@
+# Centralized iOS signing. The distribution cert + provisioning profiles live,
+# encrypted, in the match-certs repo; MATCH_PASSWORD decrypts them.
+storage_mode("git")
+# SSH so CI authenticates with a read-only deploy key (MATCH_GIT_SSH_KEY),
+# sidestepping HTTPS PAT/org-approval issues.
+git_url("git@github.com:MaybeItsSoftware/match-certs.git")
+type("appstore")
+app_identifier(["uk.co.maybeitssoftware.watchlondonmove"])

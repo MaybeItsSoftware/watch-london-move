@@ -1,0 +1,4 @@
+app_identifier("uk.co.maybeitssoftware.watchlondonmove")
+
+# Authentication is done with an App Store Connect API key (see the Fastfile),
+# so no apple_id / team credentials are needed here.

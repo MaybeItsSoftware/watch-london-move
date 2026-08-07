@@ -1,0 +1,155 @@
+# Release lanes for Watch London Move (Capacitor).
+#
+#   bundle exec fastlane ios beta        # build IPA → TestFlight (called by deploy.yml on tag)
+#   bundle exec fastlane ios release     # submit latest TestFlight build for App Store review
+#   bundle exec fastlane android beta    # build AAB → Play internal testing
+#   bundle exec fastlane android promote # promote internal → production
+#
+# Auth is via an App Store Connect API key (iOS) and a Play service account
+# (Android), both supplied through env vars in CI. iOS signing comes from
+# `match`; Android signing from gradle's key.properties (written by CI).
+#
+# The apps are the Vite build running in a Capacitor WebView, so every lane
+# starts by building the web bundle and `cap sync`-ing it into the native
+# project — the native trees hold a copy of dist/, not a reference to it.
+
+ROOT     = File.expand_path("..", __dir__)
+FRONTEND = File.join(ROOT, "frontend")
+APP_ID   = "uk.co.maybeitssoftware.watchlondonmove"
+TEAM_ID  = ENV["TEAM_ID"] || "6NQNU5YSC2"
+
+# BUILD_NUMBER must be set by CI (deploy.yml passes github.run_number).
+# Both stores require a strictly increasing integer across every submission, so
+# this must never fall back silently — an accidental local submission with a
+# high number would block all future CI uploads with lower run numbers. Run
+# locally only with an explicit: BUILD_NUMBER=<n> bundle exec fastlane …
+BUILD_NUMBER = ENV.fetch("BUILD_NUMBER") { raise "BUILD_NUMBER env var is required. Set it to a value higher than the last store submission." }
+
+# Vite build + copy into the given native platform ("ios" / "android").
+def sync_web(platform)
+  sh("cd #{FRONTEND} && npm ci && npm run build && npx cap sync #{platform}")
+end
+
+platform :ios do
+  desc "Build a signed release IPA and upload it to TestFlight"
+  lane :beta do
+    setup_ci
+
+    api_key = app_store_connect_api_key(
+      key_id:                ENV["ASC_KEY_ID"],
+      issuer_id:             ENV["ASC_ISSUER_ID"],
+      key_content:           ENV["ASC_KEY_CONTENT"],
+      is_key_content_base64: true,
+    )
+
+    match(
+      type:           "appstore",
+      app_identifier: APP_ID,
+      api_key:        api_key,
+      readonly:       is_ci,
+    )
+
+    update_code_signing_settings(
+      path:                  File.join(FRONTEND, "ios", "App", "App.xcodeproj"),
+      use_automatic_signing: false,
+      team_id:               TEAM_ID,
+      code_sign_identity:    "Apple Distribution",
+      profile_name:          "match AppStore #{APP_ID}",
+      bundle_identifier:     APP_ID,
+      targets:               ["App"],
+    )
+
+    sync_web("ios")
+
+    build_app(
+      project:          File.join(FRONTEND, "ios", "App", "App.xcodeproj"),
+      scheme:           "App",
+      export_method:    "app-store",
+      output_directory: File.join(ROOT, "build", "ios"),
+      # MARKETING_VERSION is committed by semantic-release; the build number
+      # comes from the CI run so every upload is unique.
+      xcargs:           "CURRENT_PROJECT_VERSION=#{BUILD_NUMBER}",
+      export_options:   {
+        provisioningProfiles: { APP_ID => "match AppStore #{APP_ID}" },
+      },
+    )
+
+    upload_to_testflight(
+      api_key:                           api_key,
+      ipa:                               lane_context[SharedValues::IPA_OUTPUT_PATH],
+      skip_waiting_for_build_processing: true,
+    )
+  end
+
+  desc "Submit a processed TestFlight build for App Store review"
+  lane :release do
+    # Strip leading 'v' so App Store Connect gets a plain semver (e.g. "0.2.0").
+    version = (ENV["VERSION"] || "").sub(/\Av/, "")
+
+    api_key = app_store_connect_api_key(
+      key_id:                ENV["ASC_KEY_ID"],
+      issuer_id:             ENV["ASC_ISSUER_ID"],
+      key_content:           ENV["ASC_KEY_CONTENT"],
+      is_key_content_base64: true,
+    )
+
+    upload_to_app_store(
+      api_key:            api_key,
+      app_identifier:     APP_ID,
+      app_version:        version,
+      # The binary is already on TestFlight — skip re-uploading the IPA.
+      skip_binary_upload: true,
+      # No store metadata/screenshots are checked in yet — manage them in App
+      # Store Connect for now. Flip these (and add fastlane/metadata/,
+      # fastlane/screenshots/) once metadata lives in the repo, as in
+      # open-parliament.
+      skip_metadata:      true,
+      skip_screenshots:   true,
+      submit_for_review:  true,
+      # Release manually after Apple approves, so you control the rollout moment.
+      automatic_release:  false,
+      force:              true, # skip the HTML diff report
+      # Matches ITSAppUsesNonExemptEncryption=false in ios/App/App/Info.plist
+      # (TLS-only networking, no bundled crypto).
+      export_compliance_uses_encryption: false,
+    )
+  end
+end
+
+platform :android do
+  desc "Build a signed release AAB and upload it to Play internal testing"
+  lane :beta do
+    sync_web("android")
+
+    sh("cd #{File.join(FRONTEND, "android")} && ./gradlew bundleRelease -PbuildNumber=#{BUILD_NUMBER}")
+
+    upload_to_play_store(
+      package_name:            APP_ID,
+      track:                   "internal",
+      aab:                     File.join(FRONTEND, "android", "app", "build", "outputs", "bundle", "release", "app-release.aab"),
+      json_key_data:           ENV["PLAY_SERVICE_ACCOUNT_JSON"],
+      skip_upload_apk:         true,
+      skip_upload_metadata:    true,
+      skip_upload_images:      true,
+      skip_upload_screenshots: true,
+    )
+  end
+
+  desc "Promote the current internal-track build to production"
+  lane :promote do
+    upload_to_play_store(
+      package_name:            APP_ID,
+      track:                   "internal",
+      track_promote_to:        "production",
+      json_key_data:           ENV["PLAY_SERVICE_ACCOUNT_JSON"],
+      skip_upload_apk:         true,
+      skip_upload_aab:         true,
+      # No store metadata is checked in yet — see the ios release lane note.
+      skip_upload_metadata:    true,
+      skip_upload_images:      true,
+      skip_upload_screenshots: true,
+      # Optional staged rollout — start at 10 % and ramp via Play Console.
+      # rollout: "0.1",
+    )
+  end
+end

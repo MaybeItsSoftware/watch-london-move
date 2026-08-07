@@ -123,10 +123,14 @@ These are already handled; they are listed because they are easy to undo.
 - **Relative asset URLs.** `vite.config.ts` sets `base: './'` and model loading
   uses `import.meta.env.BASE_URL`, because the WebView origin is not a web root.
 
+## Releasing
+
+Versioning and store deployment are automated — conventional commits →
+semantic-release → Fastlane → TestFlight / Play internal. See `../RELEASING.md`
+for the pipeline and the remaining one-time store onboarding steps.
+
 ## Not done
 
-- No Fastlane, CI, code signing, or store metadata. The `mobile-release-setup`
-  skill covers TestFlight and Play deployment.
 - No `PrivacyInfo.xcprivacy`. The app collects nothing, but iOS 17+ requires the
   file for App Store submission.
 - The JS bundle is ~2.1 MB (590 kB gzipped) in one chunk, which is a slow cold

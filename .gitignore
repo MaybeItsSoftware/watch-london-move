@@ -28,3 +28,10 @@
 # build output, copied web assets and per-machine state are covered by the
 # .gitignore Capacitor generates inside each of them.
 /frontend/dist
+
+# Release pipeline (see RELEASING.md): fastlane build output and the Android
+# signing material CI materializes from secrets.
+/build
+/fastlane/report.xml
+/frontend/android/key.properties
+/frontend/android/app/upload-keystore.jks
