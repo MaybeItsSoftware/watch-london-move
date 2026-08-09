@@ -23,6 +23,13 @@ export function easeInOutSine(t: number): number {
   return -(Math.cos(Math.PI * t) - 1) / 2;
 }
 
+/** Starts at full speed and decelerates to rest. For a glide picked up partway
+ *  along a route rather than departing a stop, where `easeInOutSine` would have
+ *  the vehicle accelerate from a standstill it was never at. */
+export function easeOutSine(t: number): number {
+  return Math.sin((Math.PI * t) / 2);
+}
+
 /** Fast equirectangular distance in metres between two [lon, lat] points. */
 export function approxDistanceMeters(from: [number, number], to: [number, number]): number {
   const meanLat = ((from[1] + to[1]) / 2) * DEG_TO_RAD;

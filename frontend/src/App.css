@@ -58,6 +58,18 @@ textarea {
   position: relative;
 }
 
+/* The panels stay dark in every phase — they are chrome, not map — but a
+   translucent dark panel over a bright basemap picks up whatever is behind it
+   and loses contrast against small dim text. Over a light map they go nearly
+   opaque; over the night map the translucency is what keeps them from reading
+   as cut-out holes. */
+.app-shell[data-basemap='day'],
+.app-shell[data-basemap='dusk'] {
+  --panel: rgba(11, 15, 26, 0.93);
+  --panel-hover: rgba(30, 39, 61, 0.97);
+  --panel-border: rgba(148, 163, 184, 0.3);
+}
+
 .map {
   width: 100%;
   height: 100%;
@@ -155,6 +167,42 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Segmented control (basemap: Auto / Day / Night) */
+.segmented {
+  display: inline-flex;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(8, 12, 22, 0.55);
+  overflow: hidden;
+}
+
+.segment {
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--panel-border);
+}
+
+.segment:hover {
+  background: var(--panel-hover);
+}
+
+.segment.active {
+  color: var(--bg);
+  background: var(--accent);
 }
 
 .link-button {
@@ -327,7 +375,31 @@ textarea {
   border-color: var(--accent);
 }
 
+/* deck.gl hover tooltip. deck writes its own inline positioning onto this
+   element, so only appearance is set here — laying it out would fight it. */
+.deck-tooltip {
+  padding: 6px 10px !important;
+  border-radius: 8px !important;
+  border-left: 3px solid var(--accent) !important;
+  background: var(--panel) !important;
+  color: var(--text) !important;
+  font-family: inherit !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+  white-space: pre-line !important;
+  pointer-events: none !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
 /* Info panel */
+.info-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .info-panel {
   position: absolute;
   right: var(--edge-right);
@@ -494,10 +566,16 @@ textarea {
   }
 
   .legend-pill,
-  .pill-button {
+  .pill-button,
+  .segment {
     min-height: 36px;
     padding-left: 12px;
     padding-right: 12px;
+  }
+
+  /* No hover on touch, so the tooltip is dead weight there. */
+  .deck-tooltip {
+    display: none !important;
   }
 
   .sidebar-reopen {
@@ -513,7 +591,8 @@ textarea {
      a mid-range phone. Opaque backgrounds get the same legibility for free. */
   .panel,
   .legend-pill,
-  .pill-button {
+  .pill-button,
+  .segmented {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: #121826;

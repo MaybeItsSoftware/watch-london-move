@@ -6,8 +6,9 @@ const HEADING_MIN_MOVE_METERS = 10;
 const METERS_PER_DEGREE_LAT = 111320;
 
 class StateStore {
-  constructor(tileSizeDeg) {
+  constructor(tileSizeDeg, arrivalRevisionMs = 0) {
     this.tileSizeDeg = tileSizeDeg;
+    this.arrivalRevisionMs = arrivalRevisionMs;
     this.current = new Map();
     // Only the fields getDelta compares, not whole vehicles: cloning the entire
     // fleet every emit tick allocated a second copy of it for no benefit.
@@ -56,6 +57,51 @@ class StateStore {
       this.byTile.set(tile, members);
     }
     return members;
+  }
+
+  /**
+   * Has this vehicle's predicted arrival moved far enough to be worth a message
+   * of its own, even though it has not moved?
+   *
+   * Position alone is too coarse a trigger. A vehicle's coordinates only change
+   * when its *next stop* changes, but TfL revises the arrival time at that stop
+   * on every poll — so a client that is told only about position runs its glide
+   * to completion and then sits frozen on the stop until the next full snapshot,
+   * which measured at ~86% of the fleet for most of every snapshot interval.
+   *
+   * The threshold is what makes this affordable. TfL nudges predictions by a
+   * second or two constantly, so an equality test would mark nearly every
+   * vehicle changed on every poll and turn deltas into full snapshots.
+   */
+  arrivalRevised(previous, next) {
+    if (!this.arrivalRevisionMs) {
+      return false;
+    }
+    const before = previous.dueAt;
+    const after = next.expected_arrival_ms ?? null;
+    if (before === null || after === null) {
+      return before !== after;
+    }
+    return Math.abs(after - before) > this.arrivalRevisionMs;
+  }
+
+  /**
+   * Identity of a vehicle's stop *sequence*, as the naptan ids in order.
+   *
+   * The sequence is what makes a schedule delta cheap. Every deadline in the
+   * schedule is revised on every poll — the same constant nudging that
+   * `arrivalRevised` exists to absorb — so comparing the times would mark
+   * essentially the whole fleet changed every cycle and collapse deltas back
+   * into full snapshots. The list of stops, by contrast, only changes when the
+   * vehicle actually reaches one and TfL drops it off the front, which is
+   * exactly the moment a client's leg queue goes stale and must be replaced.
+   *
+   * Stop 0's timing keeps its own thresholded trigger in `arrivalRevised`: it is
+   * the leg being travelled now, so a real revision there is worth a message
+   * even when the sequence has not moved.
+   */
+  static scheduleKey(vehicle) {
+    return Array.isArray(vehicle.schedule) ? vehicle.schedule.map((stop) => stop.naptan).join('>') : '';
   }
 
   resolveHeading(previous, next) {
@@ -162,11 +208,14 @@ class StateStore {
 
     for (const [id, vehicle] of this.current.entries()) {
       const previous = this.previous.get(id);
+      const scheduleKey = StateStore.scheduleKey(vehicle);
       if (
         previous &&
         previous.lat === vehicle.lat &&
         previous.lon === vehicle.lon &&
-        previous.heading === vehicle.heading
+        previous.heading === vehicle.heading &&
+        previous.scheduleKey === scheduleKey &&
+        !this.arrivalRevised(previous, vehicle)
       ) {
         continue;
       }
@@ -184,6 +233,8 @@ class StateStore {
         lon: vehicle.lon,
         heading: vehicle.heading,
         tile: vehicle.tile,
+        dueAt: vehicle.expected_arrival_ms ?? null,
+        scheduleKey,
       });
     }
 

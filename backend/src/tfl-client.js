@@ -11,6 +11,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// TfL suffixes a stop's `commonName` with what kind of place it is, but leaves
+// an arrival's `stationName` bare. Stripping it first lets canonicalization put
+// back whichever suffix that mode actually uses — it appends " Station" for the
+// tube and nothing for tram, DLR, Elizabeth or Overground.
+const STOP_KIND_SUFFIX = / (?:Underground Station|DLR Station|Rail Station|Tram Stop)$/;
+
+/**
+ * A rail stop as it should read on screen. The same station reaches us spelled
+ * two ways depending on which field it came out of — "Wimbledon" in an arrival's
+ * `stationName`, "Wimbledon Tram Stop" in the stop index's `commonName` — and a
+ * vehicle's next-stop line is now built from both, so they have to be normalised
+ * through one place or the panel changes wording as the vehicle moves along it.
+ */
+function railStationName(name, lineId) {
+  return canonicalizeStationName((name || '').replace(STOP_KIND_SUFFIX, ''), lineId);
+}
+
 function chunk(items, size) {
   const groups = [];
   for (let i = 0; i < items.length; i += size) {
@@ -49,6 +66,25 @@ class TflClient {
 
   getStopPointCount() {
     return this.stopPoints.size;
+  }
+
+  // The index is ~33k stops network-wide, far too many to send at once, and
+  // only useful to a client zoomed in far enough to read the names. Callers pass
+  // the box they are looking at and take a hard cap: a request for too wide an
+  // area is answered with nothing rather than with an arbitrary subset, so the
+  // client can tell "no stops here" from "too many to draw".
+  getStopsInBounds({ west, south, east, north }, limit = 400) {
+    const stops = [];
+    for (const [id, stop] of this.stopPoints) {
+      if (stop.lat < south || stop.lat > north || stop.lon < west || stop.lon > east) {
+        continue;
+      }
+      if (stops.length >= limit) {
+        return { stops: [], truncated: true };
+      }
+      stops.push({ id, lat: stop.lat, lon: stop.lon, name: stop.name });
+    }
+    return { stops, truncated: false };
   }
 
   // /Line/{id}/StopPoints does not accept comma-separated ids, so this costs one
@@ -219,9 +255,110 @@ class TflClient {
     return index;
   }
 
-  // A vehicle appears once per upcoming stop, so the raw feed has ~8 rows per
-  // vehicle. Keep only the nearest stop — that is where the vehicle is heading now.
-  static nearestStopArrivals(arrivals) {
+  /**
+   * When this vehicle is due at its next stop, as an absolute epoch millisecond.
+   *
+   * `timeToStation` is seconds *from when TfL computed it*, which is not when we
+   * read it: the whole-network bus feed alone takes ~10s to transfer, and it then
+   * sits in a cache window before being emitted. Carrying a relative countdown
+   * through that pipeline means it arrives already spent, which made every glide
+   * too slow and every vehicle late. An absolute deadline survives the trip.
+   *
+   * `fetchedAtMs` is the instant the request *started*, which is the right basis
+   * for the derived fallbacks — the response body describes the world as of
+   * roughly then, not as of when the last byte landed.
+   */
+  static expectedArrivalMs(item, fetchedAtMs) {
+    const ttlMs = Number.isFinite(item.timeToStation) ? item.timeToStation * 1000 : null;
+    const derived = ttlMs === null ? null : fetchedAtMs + ttlMs;
+
+    // Cross-checking against our own arithmetic catches TfL's placeholder dates
+    // ("0001-01-01T00:00:00") and a genuinely skewed clock in one comparison. Two
+    // minutes is far wider than any transfer lag and far narrower than a garbage
+    // timestamp, so a disagreement means the field is not usable.
+    const absolute = Date.parse(item.expectedArrival);
+    if (Number.isFinite(absolute) && (derived === null || Math.abs(absolute - derived) <= 120000)) {
+      return absolute;
+    }
+
+    // Second choice: TfL's own record of when it computed the prediction.
+    const inserted = Date.parse(item.timestamp);
+    if (Number.isFinite(inserted) && ttlMs !== null && Math.abs(inserted - fetchedAtMs) <= 120000) {
+      return inserted + ttlMs;
+    }
+
+    return derived;
+  }
+
+  /**
+   * Of two candidate arrivals for the same vehicle, is the first the better
+   * description of where it is heading *now*?
+   *
+   * An arrival still ahead of us always beats one already behind, and among
+   * those ahead the soonest wins — that is the stop being approached. When every
+   * prediction has expired the vehicle has run off the end of what TfL told us,
+   * so the latest one is the furthest along its route and the closest thing to
+   * its last known position.
+   */
+  static isBetterArrival(candidate, incumbent, nowMs) {
+    const candidateAhead = candidate >= nowMs;
+    const incumbentAhead = incumbent >= nowMs;
+    if (candidateAhead !== incumbentAhead) {
+      return candidateAhead;
+    }
+    return candidateAhead ? candidate < incumbent : candidate > incumbent;
+  }
+
+  /**
+   * Total order over one vehicle's candidate rows, ranking them exactly as
+   * `isBetterArrival` compares a pair: stops still ahead first and soonest
+   * first, then the expired ones latest-first.
+   *
+   * Ties return 0 rather than an arbitrary side. `isBetterArrival` answers
+   * "strictly better?", so two rows sharing a deadline make it false both ways;
+   * turning that into 1 both ways would be an inconsistent comparator and would
+   * let the engine reorder equals. Sorting is stable, so 0 keeps feed order for
+   * equals — which is what the previous single-incumbent loop did, and what
+   * makes element 0 provably the same row it used to pick.
+   *
+   * A row we cannot time is a last resort: it positions the vehicle, but any row
+   * with a real prediction describes it better, so nulls sort to the back.
+   */
+  static compareArrivals(a, b, nowMs) {
+    if (a.dueAt === b.dueAt) {
+      return 0;
+    }
+    if (a.dueAt === null) {
+      return 1;
+    }
+    if (b.dueAt === null) {
+      return -1;
+    }
+    return TflClient.isBetterArrival(a.dueAt, b.dueAt, nowMs) ? -1 : 1;
+  }
+
+  /**
+   * A vehicle appears once per upcoming stop, so the raw feed has ~8 rows per
+   * vehicle. One of them positions it; the next few describe where it is going.
+   *
+   * Picking the smallest `timeToStation` is the obvious choice and the wrong
+   * one. TfL serves predictions about 70 seconds after computing them, so the
+   * nearest stop by that measure is usually one the vehicle has *already passed*
+   * — measured against the live feed, that mis-places 46% of Central line trains
+   * and leaves them parked on a platform they have left. Comparing absolute
+   * arrival times against the clock instead picks the stop genuinely still
+   * ahead, which is both where the vehicle is going and the far end of the
+   * stretch of track or road it is currently on.
+   *
+   * Returns `{ item, schedule }` per vehicle, `item === schedule[0]`, with the
+   * schedule capped at `scheduleStops` rows *including* that first one — so the
+   * default of 3 puts two further stops on the wire and 1 reproduces the old
+   * single-stop result. The tail is cut at the first row that is not strictly
+   * later than the one before it, which drops the expired rows behind the
+   * vehicle without a second pass: they sort latest-first, so the very first of
+   * them already fails the test. Cost is one sort of ~8 elements per vehicle.
+   */
+  static nearestStopArrivals(arrivals, nowMs, scheduleStops = 1) {
     const byVehicle = new Map();
 
     arrivals.forEach((item) => {
@@ -229,14 +366,43 @@ class TflClient {
       if (!key || !item?.naptanId) {
         return;
       }
-      const timeToStation = Number.isFinite(item.timeToStation) ? item.timeToStation : Infinity;
-      const best = byVehicle.get(key);
-      if (!best || timeToStation < best.timeToStation) {
-        byVehicle.set(key, { timeToStation, item });
+
+      const entry = { dueAt: TflClient.expectedArrivalMs(item, nowMs), item };
+      const rows = byVehicle.get(key);
+      if (rows) {
+        rows.push(entry);
+      } else {
+        byVehicle.set(key, [entry]);
       }
     });
 
-    return [...byVehicle.values()].map((entry) => entry.item);
+    const results = [];
+    for (const rows of byVehicle.values()) {
+      rows.sort((a, b) => TflClient.compareArrivals(a, b, nowMs));
+
+      const schedule = [rows[0].item];
+      const seen = new Set([rows[0].item.naptanId]);
+      let previousDueAt = rows[0].dueAt;
+
+      for (let i = 1; i < rows.length && schedule.length < scheduleStops; i += 1) {
+        const { dueAt, item } = rows[i];
+        if (previousDueAt === null || dueAt === null || dueAt <= previousDueAt) {
+          break;
+        }
+        previousDueAt = dueAt;
+        // The same stop can appear twice (two platforms of one station, a bus
+        // route that doubles back); a repeat would give the client a zero-length
+        // leg to travel, so keep the first and carry on down the list.
+        if (!seen.has(item.naptanId)) {
+          seen.add(item.naptanId);
+          schedule.push(item);
+        }
+      }
+
+      results.push({ item: schedule[0], schedule });
+    }
+
+    return results;
   }
 
   getFailedLines() {
@@ -248,6 +414,9 @@ class TflClient {
   // its own batch rather than the whole cycle.
   async fetchArrivalsByLine(lineIds, mapArrivals) {
     const groups = chunk(lineIds, this.config.linesPerRequest);
+    // Stamped before the requests go out, so `expectedArrivalMs` dates its
+    // fallbacks from when the batch was asked for rather than when it answered.
+    const fetchedAtMs = Date.now();
 
     const settled = await Promise.allSettled(
       groups.map(async (group) => {
@@ -273,7 +442,7 @@ class TflClient {
           byLine.get(lineId).push(item);
         });
 
-        return [...byLine].flatMap(([lineId, items]) => mapArrivals(lineId, items));
+        return [...byLine].flatMap(([lineId, items]) => mapArrivals(lineId, items, fetchedAtMs));
       }),
     );
 
@@ -338,7 +507,45 @@ class TflClient {
     return (Array.isArray(lines) ? lines : []).map((line) => line?.id).filter(Boolean);
   }
 
-  static busVehicle(item, lineId, stopPoints, source) {
+  /**
+   * The vehicle's next few stops, positioned and timed, index 0 being the stop
+   * it is heading for right now — the same one the record's own `lat`/`lon`/
+   * `station_name`/`expected_arrival_ms` describe.
+   *
+   * That first entry is deliberately redundant. It keeps "where the vehicle is"
+   * and "where it goes next" derived from one list rather than from two code
+   * paths that could drift apart, and it gives the encoder a single thing to
+   * slice.
+   *
+   * Truncated at the first stop we cannot place or time rather than skipping it.
+   * The client consumes this as a queue of legs to glide along, so a hole in the
+   * middle would not lose one stop, it would send the vehicle down the wrong leg
+   * for the rest of the list.
+   */
+  static buildSchedule(items, stopPoints, fetchedAtMs, formatName = (name) => name) {
+    const schedule = [];
+    for (const item of items) {
+      const stop = stopPoints.get(item.naptanId);
+      const dueAtMs = TflClient.expectedArrivalMs(item, fetchedAtMs);
+      if (!stop || !Number.isFinite(dueAtMs)) {
+        break;
+      }
+      schedule.push({
+        naptan: item.naptanId,
+        lat: stop.lat,
+        lon: stop.lon,
+        // The stop index holds `commonName`, which for rail is the full
+        // "Seven Sisters Underground Station". The record's own `station_name`
+        // is already tidied, so the rest of the list has to be tidied the same
+        // way or the info panel changes wording as the vehicle moves along it.
+        name: formatName(stop.name || ''),
+        due_at_ms: dueAtMs,
+      });
+    }
+    return schedule;
+  }
+
+  static busVehicle(item, lineId, stopPoints, source, fetchedAtMs, schedule = [item]) {
     const stop = stopPoints.get(item.naptanId);
     if (!stop) {
       return null;
@@ -353,6 +560,11 @@ class TflClient {
       destination: item.destinationName || item.towards || 'Unknown',
       station_name: stop.name,
       time_to_station: Number.isFinite(item.timeToStation) ? item.timeToStation : null,
+      expected_arrival_ms: TflClient.expectedArrivalMs(item, fetchedAtMs),
+      // Always set, never conditional: `StateStore.upsertVehicles` merges each
+      // record over the previous one, so an omitted field is not "unchanged",
+      // it is last poll's stop list kept forever.
+      schedule: TflClient.buildSchedule(schedule, stopPoints, fetchedAtMs),
       route_group: 'bus',
       source,
     };
@@ -361,7 +573,7 @@ class TflClient {
   // One request for every bus in London. The response is large (~90MB of JSON,
   // ~8MB gzipped, a few hundred ms to parse) but it replaces the ~130 per-line
   // requests the same coverage would otherwise cost each cycle.
-  async fetchAllBusArrivals(stopPoints) {
+  async fetchAllBusArrivals(stopPoints, fetchedAtMs) {
     const arrivals = await this.getJsonWithRetry(
       '/Mode/bus/Arrivals?count=-1',
       this.config.retryCount,
@@ -369,8 +581,14 @@ class TflClient {
       { timeout: this.config.busFeedTimeoutMs },
     );
 
-    return TflClient.nearestStopArrivals(Array.isArray(arrivals) ? arrivals : [])
-      .map((item) => TflClient.busVehicle(item, item.lineId, stopPoints, 'tfl-mode-arrivals'))
+    return TflClient.nearestStopArrivals(
+      Array.isArray(arrivals) ? arrivals : [],
+      fetchedAtMs,
+      this.config.scheduleStops,
+    )
+      .map(({ item, schedule }) =>
+        TflClient.busVehicle(item, item.lineId, stopPoints, 'tfl-mode-arrivals', fetchedAtMs, schedule),
+      )
       .filter(Boolean);
   }
 
@@ -384,7 +602,7 @@ class TflClient {
 
     if (this.config.allBusLines) {
       try {
-        const vehicles = await this.fetchAllBusArrivals(stopPoints);
+        const vehicles = await this.fetchAllBusArrivals(stopPoints, now);
         this.cache.bus = { at: now, data: vehicles, failedLines: [] };
         return vehicles;
       } catch (error) {
@@ -396,10 +614,14 @@ class TflClient {
       }
     }
 
-    const { vehicles, failedLines } = await this.fetchArrivalsByLine(this.config.busLines, (lineId, arrivals) =>
-      TflClient.nearestStopArrivals(arrivals)
-        .map((item) => TflClient.busVehicle(item, lineId, stopPoints, 'tfl-line-arrivals'))
-        .filter(Boolean),
+    const { vehicles, failedLines } = await this.fetchArrivalsByLine(
+      this.config.busLines,
+      (lineId, arrivals, fetchedAtMs) =>
+        TflClient.nearestStopArrivals(arrivals, fetchedAtMs, this.config.scheduleStops)
+          .map(({ item, schedule }) =>
+            TflClient.busVehicle(item, lineId, stopPoints, 'tfl-line-arrivals', fetchedAtMs, schedule),
+          )
+          .filter(Boolean),
     );
 
     this.cache.bus.failedLines = failedLines;
@@ -421,28 +643,36 @@ class TflClient {
 
     const stopPoints = await this.ensureStopPoints();
 
-    const { vehicles, failedLines } = await this.fetchArrivalsByLine(this.config.trainLines, (lineId, arrivals) =>
-      TflClient.nearestStopArrivals(arrivals)
-        .map((item) => {
-          const stop = stopPoints.get(item.naptanId);
-          if (!stop) {
-            return null;
-          }
-          return {
-            id: `${lineId}-${item.vehicleId || `${item.id || item.naptanId}`}`,
-            type: vehicleTypeForLine(lineId),
-            line_name: item.lineName || lineId,
-            lat: stop.lat,
-            lon: stop.lon,
-            heading: Number(item.bearing) || 0,
-            destination: item.destinationName || item.towards || 'Unknown',
-            station_name: canonicalizeStationName((item.stationName || '').replace(' Underground Station', ''), lineId),
-            time_to_station: Number.isFinite(item.timeToStation) ? item.timeToStation : null,
-            route_group: lineId,
-            source: 'tfl-line-arrivals',
-          };
-        })
-        .filter(Boolean),
+    const { vehicles, failedLines } = await this.fetchArrivalsByLine(
+      this.config.trainLines,
+      (lineId, arrivals, fetchedAtMs) =>
+        TflClient.nearestStopArrivals(arrivals, fetchedAtMs, this.config.scheduleStops)
+          .map(({ item, schedule }) => {
+            const stop = stopPoints.get(item.naptanId);
+            if (!stop) {
+              return null;
+            }
+            return {
+              id: `${lineId}-${item.vehicleId || `${item.id || item.naptanId}`}`,
+              type: vehicleTypeForLine(lineId),
+              line_name: item.lineName || lineId,
+              lat: stop.lat,
+              lon: stop.lon,
+              heading: Number(item.bearing) || 0,
+              destination: item.destinationName || item.towards || 'Unknown',
+              station_name: railStationName(item.stationName, lineId),
+              time_to_station: Number.isFinite(item.timeToStation) ? item.timeToStation : null,
+              expected_arrival_ms: TflClient.expectedArrivalMs(item, fetchedAtMs),
+              // See the note in `busVehicle`: this must be present on every
+              // record, because an absent field survives the store's merge.
+              schedule: TflClient.buildSchedule(schedule, stopPoints, fetchedAtMs, (name) =>
+                railStationName(name, lineId),
+              ),
+              route_group: lineId,
+              source: 'tfl-line-arrivals',
+            };
+          })
+          .filter(Boolean),
     );
 
     this.cache.train.failedLines = failedLines;

@@ -40,11 +40,24 @@ const corsOrigins = [
   ...new Set([...parseCsv(process.env.CORS_ORIGIN || 'http://localhost:5173'), ...NATIVE_ORIGINS]),
 ];
 
+// Clamped rather than trusted: this is a per-vehicle multiplier on the payload,
+// so a stray "50" in an environment file would quietly multiply egress for every
+// connected client. A blank or unparseable value falls back to the default the
+// same way the numeric settings below do.
+const requestedScheduleStops = Number(process.env.SCHEDULE_STOPS || 3);
+const scheduleStops = Number.isFinite(requestedScheduleStops)
+  ? Math.min(5, Math.max(1, Math.round(requestedScheduleStops)))
+  : 3;
+
 module.exports = {
   port: Number(process.env.PORT || 4010),
   corsOrigins,
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 15000),
-  emitIntervalMs: Number(process.env.EMIT_INTERVAL_MS || 10000),
+  // Costs no TfL traffic — deltas carry only the vehicles that changed, and the
+  // change rate is set by the poll cadence, so this splits the same changes
+  // across more messages rather than sending more of them. Halves how long a
+  // revised arrival sits in the emit queue.
+  emitIntervalMs: Number(process.env.EMIT_INTERVAL_MS || 5000),
   // The whole-network bus feed is ~8MB gzipped, so it refreshes on its own
   // slower cadence (every other poll) rather than every cycle.
   busCacheWindowMs: Number(process.env.BUS_CACHE_WINDOW_MS || (allBusLines ? 25000 : 10000)),
@@ -71,8 +84,26 @@ module.exports = {
   // feed lost it) — without pruning it sits frozen on the map forever.
   staleVehicleMs: Number(process.env.STALE_VEHICLE_MS || 90000),
   // Deltas can silently diverge on a dropped packet; a periodic full snapshot
-  // resynchronises every client without them having to ask.
-  fullEmitEveryN: Math.max(1, Number(process.env.FULL_EMIT_EVERY_N || 6)),
+  // resynchronises every client without them having to ask. This is a count of
+  // emit ticks, not a duration, so it tracks emitIntervalMs: both were halved
+  // and doubled together to keep a full snapshot landing about once a minute.
+  // Fulls are by far the expensive message.
+  fullEmitEveryN: Math.max(1, Number(process.env.FULL_EMIT_EVERY_N || 12)),
+  // How far a vehicle's predicted arrival must move before it earns a delta of
+  // its own. Position alone does not cover it: a vehicle glides to its next stop
+  // and then has nothing to do until that stop changes, while TfL is quietly
+  // revising when it gets there. 0 disables the trigger entirely.
+  arrivalRevisionMs: Number(process.env.ARRIVAL_REVISION_MS || 15000),
+  // How many upcoming stops each vehicle carries, counting the one it is heading
+  // for now. TfL already sends ~8 predictions per vehicle and we were discarding
+  // seven of them, so the extra stops cost no requests and no parsing — only
+  // three numbers each on the wire. Their point is the gap between polls: a
+  // client given one stop finishes its glide and freezes there for the rest of
+  // the cycle, while one given the next few keeps a queue of legs to run.
+  // Clamped to 1..5 above. 1 restores the single-stop behaviour exactly; past
+  // ~5 the predictions are far enough out that TfL revises them faster than a
+  // client can reach them, so the bytes buy nothing.
+  scheduleStops,
   routeSequenceCachePath:
     process.env.ROUTE_SEQUENCE_CACHE_PATH || path.join(__dirname, '..', '.cache', 'route-sequences.json'),
   routeSequenceCacheMs: Number(process.env.ROUTE_SEQUENCE_CACHE_MS || 7 * 24 * 60 * 60 * 1000),
@@ -92,6 +123,15 @@ module.exports = {
   compression: process.env.WS_COMPRESSION !== 'false',
   // Below this a message costs more in deflate framing than it saves.
   compressionThresholdBytes: Number(process.env.WS_COMPRESSION_THRESHOLD || 512),
+  // Separate from the socket setting above: perMessageDeflate never touches the
+  // HTTP routes, and Fly's proxy does not compress application responses, so
+  // without this /stops and /snapshot go out as raw JSON. /routes does not rely
+  // on it — it serves precompressed buffers of its own.
+  httpCompression: process.env.HTTP_COMPRESSION !== 'false',
+  // Higher than the socket threshold because an HTTP response pays the encoding
+  // headers and a decompressor setup once for the whole body rather than
+  // amortising them over a stream of frames.
+  httpCompressionThresholdBytes: Number(process.env.HTTP_COMPRESSION_THRESHOLD || 1024),
   // Grid cell for viewport subscriptions. 0.05 deg is ~5.5km across London,
   // so a phone-sized viewport lands on a handful of cells while the ~150 cells
   // covering the network stay few enough to serialise per emit tick.

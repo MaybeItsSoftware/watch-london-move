@@ -1,6 +1,13 @@
 import { useMemo } from 'react';
 import { FILTER_COLORS, FILTER_LABELS, FILTER_ORDER } from '../config';
+import type { BasemapMode } from '../config';
 import type { FilterKey, LineSummary } from '../types';
+
+const BASEMAP_MODES: { key: BasemapMode; label: string }[] = [
+  { key: 'auto', label: 'Auto' },
+  { key: 'day', label: 'Day' },
+  { key: 'night', label: 'Night' },
+];
 
 type SidebarProps = {
   open: boolean;
@@ -16,6 +23,8 @@ type SidebarProps = {
   onClearLines: () => void;
   showRoutes: boolean;
   onToggleRoutes: () => void;
+  basemapMode: BasemapMode;
+  onBasemapModeChange: (mode: BasemapMode) => void;
 };
 
 /* Drawn rather than set as ☰ / ✕: neither character is in the iOS system font,
@@ -62,6 +71,8 @@ export function Sidebar({
   onClearLines,
   showRoutes,
   onToggleRoutes,
+  basemapMode,
+  onBasemapModeChange,
 }: SidebarProps) {
   const selected = useMemo(() => new Set(selectedLines), [selectedLines]);
 
@@ -133,6 +144,19 @@ export function Sidebar({
         >
           routes
         </button>
+        {/* Auto follows the sun over London: bright by day, dark at night. */}
+        <div className="segmented" role="group" aria-label="Basemap">
+          {BASEMAP_MODES.map((mode) => (
+            <button
+              key={mode.key}
+              className={`segment${basemapMode === mode.key ? ' active' : ''}`}
+              onClick={() => onBasemapModeChange(mode.key)}
+              aria-pressed={basemapMode === mode.key}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
         {selectedLines.length > 0 ? (
           <button className="link-button" onClick={onClearLines}>
             clear {selectedLines.length} selected
