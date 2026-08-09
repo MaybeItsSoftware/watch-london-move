@@ -122,6 +122,17 @@ These are already handled; they are listed because they are easy to undo.
   render as tofu boxes; `Sidebar.tsx` draws them as inline SVG.
 - **Relative asset URLs.** `vite.config.ts` sets `base: './'` and model loading
   uses `import.meta.env.BASE_URL`, because the WebView origin is not a web root.
+- **No service worker.** The web build registers `public/sw.js` to cache the app
+  shell, the bundled `data/*.json`, and the backend's `/stops` and `/routes`
+  responses — the ~5.2 MB a cold start would otherwise re-download. Service
+  workers do not run in the Capacitor WebView, so `src/sw-register.ts` returns
+  early on `Capacitor.isNativePlatform()` *before* it touches
+  `navigator.serviceWorker`. Not a defensive `catch`: on Android the origin is
+  `https://localhost`, a secure context where registration may well succeed and
+  then sit in front of the asset loader doing nothing useful. The native apps
+  get the same data from `dist/data/`, copied into the binary by `cap sync`, so
+  they need no runtime cache for it. `sw.js` is still copied into the app
+  bundle (15 KB, inert) because it lives in `public/`.
 
 ## Releasing
 
@@ -133,8 +144,11 @@ for the pipeline and the remaining one-time store onboarding steps.
 
 - No `PrivacyInfo.xcprivacy`. The app collects nothing, but iOS 17+ requires the
   file for App Store submission.
-- The JS bundle is ~2.1 MB (590 kB gzipped) in one chunk, which is a slow cold
-  start in a WebView. Code-splitting deck.gl would help.
+- The JS is ~2.2 MB across three chunks: `maplibre` (1.0 MB), the app and
+  eager deck.gl (0.9 MB), and `model-layers` (0.25 MB, fetched only when the
+  camera first reaches the zoom that draws 3D models). MapLibre is the bulk of
+  a cold start in a WebView and cannot be deferred — the map is the app — so
+  further work here means a lighter renderer, not more splitting.
 - Basemap tiles come from OpenFreeMap, a free keyless public server, with no
   offline handling or error state. Fine for development; a dependency worth
   reconsidering before a store release.
