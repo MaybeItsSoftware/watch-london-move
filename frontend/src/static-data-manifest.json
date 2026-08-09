@@ -1,0 +1,13 @@
+{
+  "builtAt": 1786036807373,
+  "routes": {
+    "path": "data/routes.json",
+    "bytes": 2448199,
+    "lines": 662
+  },
+  "stops": {
+    "path": "data/stops.json",
+    "bytes": 2574658,
+    "count": 33082
+  }
+}
