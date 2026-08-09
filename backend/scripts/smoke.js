@@ -14,14 +14,21 @@ function assert(condition, message) {
   }
 }
 
-async function getJson(path, allowedStatuses = [200]) {
+async function get(path, { headers, allowedStatuses = [200] } = {}) {
   let response;
   try {
-    response = await fetch(`${BASE_URL}${path}`);
+    // undici decompresses transparently but leaves the encoding on the headers,
+    // so the checks below can still see what actually came over the wire.
+    response = await fetch(`${BASE_URL}${path}`, { headers });
   } catch (error) {
     fail(`${path} unreachable at ${BASE_URL} (${error.message}) — is the server running?`);
   }
   assert(allowedStatuses.includes(response.status), `${path} returned HTTP ${response.status}, expected ${allowedStatuses.join(' or ')}`);
+  return response;
+}
+
+async function getJson(path, allowedStatuses = [200]) {
+  const response = await get(path, { allowedStatuses });
   return { status: response.status, body: await response.json() };
 }
 
@@ -35,7 +42,7 @@ async function checkHealth() {
   ['prunedLastPoll', 'prunedTotal', 'storeSize', 'emitTick', 'lastDeltaSize'].forEach((key) => {
     assert(key in body.metrics, `/health metrics missing key: ${key}`);
   });
-  ['lastTickFanoutBytes', 'totalFanoutBytes', 'bytesPerClientPerHourUncompressed', 'compression'].forEach((key) => {
+  ['lastTickFanoutBytes', 'totalFanoutBytes', 'bytesPerClientPerHourUncompressed', 'compression', 'httpCompression'].forEach((key) => {
     assert(key in body.bandwidth, `/health bandwidth missing key: ${key}`);
   });
   ['sizeDeg', 'occupied'].forEach((key) => {
@@ -52,7 +59,7 @@ function assertPayloadShape(label, body) {
   assert(Array.isArray(body.dict?.route_group), `${label} dict.route_group is not an array`);
 
   body.vehicles.forEach((tuple, i) => {
-    assert(Array.isArray(tuple) && tuple.length === 8, `${label} vehicles[${i}] is not an 8-element tuple`);
+    assert(Array.isArray(tuple) && tuple.length === 9, `${label} vehicles[${i}] is not a 9-element tuple`);
     // The dictionary indices must resolve, or the client silently renders every
     // vehicle as the wrong mode.
     assert(
@@ -63,6 +70,32 @@ function assertPayloadShape(label, body) {
       typeof body.dict.route_group[tuple[6]] === 'string',
       `${label} vehicles[${i}] route_group index ${tuple[6]} is not in dict.route_group`,
     );
+
+    // The schedule is consumed as a queue of legs to glide along, so its shape is
+    // a contract and not just a payload: flat [lat, lon, secs] triples, every one
+    // strictly later than the leg before it — starting from field 7, which is the
+    // leg the vehicle is on now. An out-of-order or equal deadline is a leg of
+    // zero or negative duration and would stall or reverse the interpolation.
+    const schedule = tuple[8];
+    assert(Array.isArray(schedule), `${label} vehicles[${i}] schedule is not an array`);
+    assert(
+      schedule.length % 3 === 0,
+      `${label} vehicles[${i}] schedule has ${schedule.length} numbers, not a multiple of 3`,
+    );
+
+    let previousSeconds = tuple[7];
+    for (let s = 0; s < schedule.length; s += 3) {
+      const [lat, lon, seconds] = schedule.slice(s, s + 3);
+      assert(
+        Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(seconds),
+        `${label} vehicles[${i}] schedule stop ${s / 3} is not three finite numbers`,
+      );
+      assert(
+        previousSeconds === null || seconds > previousSeconds,
+        `${label} vehicles[${i}] schedule stop ${s / 3} is due at ${seconds}s, not after the previous ${previousSeconds}s`,
+      );
+      previousSeconds = seconds;
+    }
   });
 }
 
@@ -102,6 +135,118 @@ async function checkRoutes() {
   });
 
   return `routes ok (${body.features.length} features)`;
+}
+
+/**
+ * /routes is the largest thing this service serves — 2.69 MB raw against 256 KB
+ * of brotli — so the transport is as much a contract as the body. A regression
+ * here does not fail anything visibly; it just quietly multiplies the egress
+ * bill by ten.
+ */
+async function checkRoutesTransport() {
+  const version = await get('/routes/version', { allowedStatuses: [200, 503] });
+  if (version.status === 503) {
+    const body = await version.json();
+    assert(body.status === 'loading', `/routes/version 503 body is ${JSON.stringify(body)}`);
+    return 'routes transport ok (503 still loading)';
+  }
+
+  const meta = await version.json();
+  assert(Number.isInteger(meta.builtAt) && meta.builtAt > 0, `/routes/version builtAt is ${meta.builtAt}`);
+  assert(typeof meta.complete === 'boolean', `/routes/version complete is ${meta.complete}`);
+  assert(Number.isInteger(meta.lines) && meta.lines > 0, `/routes/version lines is ${meta.lines}`);
+  assert(typeof meta.etag === 'string' && meta.etag.startsWith('"'), `/routes/version etag is ${meta.etag}`);
+  assert(
+    version.headers.get('cache-control') === 'no-store',
+    `/routes/version Cache-Control is ${version.headers.get('cache-control')}, expected no-store`,
+  );
+
+  const sizes = {};
+  for (const encoding of ['br', 'gzip', 'identity']) {
+    // eslint-disable-next-line no-await-in-loop -- three sequential requests, not a hot path
+    const response = await get('/routes', { headers: { 'Accept-Encoding': encoding } });
+    const served = response.headers.get('content-encoding') || 'identity';
+    assert(served === encoding, `/routes offered ${encoding} but served ${served}`);
+    sizes[encoding] = Number(response.headers.get('content-length'));
+    assert(sizes[encoding] > 0, `/routes ${encoding} sent no Content-Length`);
+    // eslint-disable-next-line no-await-in-loop
+    await response.arrayBuffer();
+  }
+  assert(sizes.br < sizes.gzip, `/routes brotli (${sizes.br}) is not smaller than gzip (${sizes.gzip})`);
+  assert(sizes.gzip < sizes.identity, `/routes gzip (${sizes.gzip}) is not smaller than raw (${sizes.identity})`);
+
+  // Browsers list gzip before br at equal quality. Honouring that order rather
+  // than the server's preference is the easy way to lose most of the saving.
+  const browserish = await get('/routes', { headers: { 'Accept-Encoding': 'gzip, deflate, br, zstd' } });
+  assert(
+    browserish.headers.get('content-encoding') === 'br',
+    `/routes served ${browserish.headers.get('content-encoding')} to a browser-style Accept-Encoding, expected br`,
+  );
+  await browserish.arrayBuffer();
+
+  const etag = browserish.headers.get('etag');
+  assert(etag === meta.etag, `/routes ETag ${etag} does not match /routes/version etag ${meta.etag}`);
+  assert(
+    browserish.headers.get('x-routes-complete') === String(meta.complete),
+    '/routes X-Routes-Complete disagrees with /routes/version',
+  );
+
+  const revalidated = await get('/routes', {
+    headers: { 'If-None-Match': etag, 'Accept-Encoding': 'br' },
+    allowedStatuses: [304],
+  });
+  const revalidatedBody = await revalidated.arrayBuffer();
+  assert(revalidatedBody.byteLength === 0, `/routes 304 carried ${revalidatedBody.byteLength} bytes of body`);
+  // The client keeps polling while geometry is still arriving, so a 304 that
+  // drops this header would either stall the poll or make it run forever.
+  assert(
+    revalidated.headers.get('x-routes-complete') === String(meta.complete),
+    '/routes 304 lost X-Routes-Complete',
+  );
+
+  // A build that is still running keeps growing, so its body must not be cached.
+  const cacheControl = browserish.headers.get('cache-control');
+  assert(
+    meta.complete ? cacheControl.includes('max-age=3600') : cacheControl === 'no-store',
+    `/routes Cache-Control is ${cacheControl} for complete=${meta.complete}`,
+  );
+
+  const pinned = await get(`/routes?v=${meta.builtAt}`, { headers: { 'Accept-Encoding': 'br' } });
+  await pinned.arrayBuffer();
+  assert(
+    pinned.headers.get('cache-control') === 'public, max-age=604800, immutable',
+    `/routes?v= Cache-Control is ${pinned.headers.get('cache-control')}, expected an immutable week`,
+  );
+  // Naming a build that is not the one being served must not get that answer
+  // pinned under the wrong URL for a week.
+  const mismatched = await get('/routes?v=1', { headers: { 'Accept-Encoding': 'br' } });
+  await mismatched.arrayBuffer();
+  assert(
+    !mismatched.headers.get('cache-control').includes('immutable'),
+    '/routes?v=<wrong> was served as immutable',
+  );
+
+  const ratio = (sizes.identity / sizes.br).toFixed(1);
+  return `routes transport ok (${sizes.identity} raw / ${sizes.gzip} gzip / ${sizes.br} br = ${ratio}x, 304 on revalidate)`;
+}
+
+async function checkStopsCompression() {
+  // Roughly Westminster to the City. Deliberately narrow: getStopsInBounds caps
+  // a slice at 400 stops and returns an empty truncated result past that, so a
+  // wider box would prove nothing about compression. ~150 stops is 12.7 KB raw.
+  const path = '/stops?bbox=-0.14,51.50,-0.12,51.52';
+  const compressed = await get(path, { headers: { 'Accept-Encoding': 'gzip' } });
+  assert(
+    compressed.headers.get('content-encoding') === 'gzip',
+    `${path} was served ${compressed.headers.get('content-encoding') || 'uncompressed'} to a gzip client`,
+  );
+  // The middleware compresses as a stream, so there is no Content-Length to read
+  // the wire size from — what is checkable here is that it engaged at all.
+  const text = await compressed.text();
+  const body = JSON.parse(text);
+  assert(Array.isArray(body.stops), `${path} stops is not an array`);
+  assert(!body.truncated, `${path} was truncated — this box has to stay under the 400-stop cap`);
+  return `stops ok (${body.stops.length} stops, ${text.length} bytes gzipped on the wire)`;
 }
 
 /**
@@ -197,6 +342,13 @@ async function checkStream() {
 }
 
 (async () => {
-  const results = [await checkHealth(), await checkSnapshot(), await checkRoutes(), await checkStream()];
+  const results = [
+    await checkHealth(),
+    await checkSnapshot(),
+    await checkRoutes(),
+    await checkRoutesTransport(),
+    await checkStopsCompression(),
+    await checkStream(),
+  ];
   console.log(`PASS: ${results.join('; ')}`);
 })().catch((error) => fail(error.message));

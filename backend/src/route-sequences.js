@@ -1,9 +1,26 @@
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const zlib = require('zlib');
+const { promisify } = require('util');
 const { vehicleTypeForLine } = require('./lines');
 
 const logger = pino({ name: 'route-sequences' });
+
+const gzipAsync = promisify(zlib.gzip);
+const brotliAsync = promisify(zlib.brotliCompress);
+
+// Measured on the real network GeoJSON — 662 lines, 121k vertices, 2.69 MB of
+// JSON. gzip 6: 649 KB in 62ms, gzip 9: 644 KB in 263ms. brotli 5: 381 KB in
+// 27ms, brotli 10: 269 KB in 743ms, brotli 11: 256 KB in 2.5s.
+//
+// The complete set is encoded once and then served for a week, so 2.5s buys
+// 2.69 MB -> 256 KB on every cold client and is trivially worth it. A partial
+// set is replaced every `routeCheckpointEvery` groups while the build runs, so
+// it takes the cheap settings rather than spending 2.5s on a body that is about
+// to be superseded.
+const COMPLETE_ENCODING = { gzipLevel: 9, brotliQuality: 11 };
+const PARTIAL_ENCODING = { gzipLevel: 6, brotliQuality: 5 };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,6 +85,13 @@ class RouteSequences {
     this.complete = false;
     this.inFlight = null;
     this.geoJsonMemo = null;
+    // When the currently held geometry was produced. Kept on the instance and
+    // not just in the cache file so /routes can serve an ETag that survives a
+    // restart: a container that comes back up on the same cache answers the
+    // client's revalidation with a 304 instead of 2.69 MB.
+    this.builtAt = 0;
+    this.encodedMemo = null;
+    this.encodingInFlight = null;
   }
 
   isLoaded() {
@@ -80,6 +104,34 @@ class RouteSequences {
 
   isComplete() {
     return this.complete;
+  }
+
+  getBuiltAt() {
+    return this.builtAt;
+  }
+
+  /**
+   * Strong validator for the geometry currently held. Derived from the data's
+   * identity rather than from a hash of the body so it is available before the
+   * body has been serialised — /routes/version and a 304 both need it without
+   * paying for an encode. The line count and the complete flag are in it
+   * because a build publishes progressively: same builtAt, more lines, and a
+   * client polling for the rest must not be told its copy is still current.
+   */
+  routeEtag() {
+    return `"r${this.builtAt.toString(36)}-${this.lines.size}-${this.complete ? 'c' : 'p'}"`;
+  }
+
+  /**
+   * Replaces the held geometry. Everything derived from it — the memoised
+   * FeatureCollection and its precompressed bodies — dies with it, and the
+   * timestamp moves so the ETag does too.
+   */
+  publish(lines, builtAt = Date.now()) {
+    this.lines = lines;
+    this.builtAt = builtAt;
+    this.geoJsonMemo = null;
+    this.encodedMemo = null;
   }
 
   async ensure() {
@@ -118,7 +170,10 @@ class RouteSequences {
       fs.writeFileSync(
         this.config.routeSequenceCachePath,
         JSON.stringify({
-          builtAt: Date.now(),
+          // The published timestamp, not the moment of the write: a restart has
+          // to reproduce the ETag the pre-restart process was serving, or every
+          // client revalidates into a full body for geometry it already holds.
+          builtAt: this.builtAt,
           complete,
           emptyLines: [...(emptyLines ?? [])],
           lines: Object.fromEntries(lines),
@@ -197,8 +252,7 @@ class RouteSequences {
     // geometry beats an empty map while the rebuild runs.
     const loaded = new Map(cached ? Object.entries(cached.lines) : []);
     if (loaded.size > 0) {
-      this.lines = loaded;
-      this.geoJsonMemo = null;
+      this.publish(loaded, cached.builtAt);
     }
 
     const lineIds = await this.targetLineIds();
@@ -245,8 +299,7 @@ class RouteSequences {
       // Publish and checkpoint as we go: at ~640 routes this build runs for many
       // minutes, so routes should appear progressively and a restart should not
       // start over from nothing.
-      this.lines = loaded;
-      this.geoJsonMemo = null;
+      this.publish(loaded);
       if ((groupIndex + 1) % this.config.routeCheckpointEvery === 0) {
         this.writeCache(loaded, false, empty);
       }
@@ -263,8 +316,7 @@ class RouteSequences {
       return this.lines;
     }
 
-    this.lines = loaded;
-    this.geoJsonMemo = null;
+    this.publish(loaded);
     // A gap-free set is trusted for the full TTL; a partial one is persisted too
     // (so the next run resumes rather than restarts) but retried sooner.
     this.complete = failedLines.length === 0;
@@ -290,6 +342,67 @@ class RouteSequences {
       };
     }
     return this.geoJsonMemo;
+  }
+
+  async encode(etag) {
+    const complete = this.complete;
+    const lineCount = this.lines.size;
+    const builtAt = this.builtAt;
+    const { gzipLevel, brotliQuality } = complete ? COMPLETE_ENCODING : PARTIAL_ENCODING;
+    const startedAt = Date.now();
+    const identity = Buffer.from(JSON.stringify(this.getRoutesGeoJSON()));
+
+    // zlib's async form hands the work to the libuv threadpool. brotli 11 over
+    // 2.69 MB is 2.5s of solid CPU, which as brotliCompressSync would stall the
+    // emit tick and every socket write for that whole time.
+    const [gzip, br] = await Promise.all([
+      gzipAsync(identity, { level: gzipLevel }),
+      brotliAsync(identity, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: brotliQuality } }),
+    ]);
+
+    logger.info(
+      { lines: lineCount, complete, identity: identity.length, gzip: gzip.length, br: br.length, ms: Date.now() - startedAt },
+      'Encoded route geometry',
+    );
+    return { etag, builtAt, complete, lineCount, identity, gzip, br };
+  }
+
+  /**
+   * The serialised body and its gzip and brotli forms, built once per published
+   * geometry. /routes is polled by every cold client and, while a build is
+   * running, polled repeatedly by each of them; compressing per request would
+   * mean re-spending that CPU on a body that has not changed since the last
+   * time. Keyed on the ETag rather than a dirty flag so a `complete` flip with
+   * no change to `lines` also invalidates.
+   */
+  async getEncodedRoutes() {
+    const etag = this.routeEtag();
+    if (this.encodedMemo?.etag === etag) {
+      return this.encodedMemo;
+    }
+
+    // Pollers arriving during the encode wait on the one already running rather
+    // than each starting their own pass over the same 2.69 MB.
+    if (this.encodingInFlight?.etag !== etag) {
+      const promise = this.encode(etag);
+      this.encodingInFlight = { etag, promise };
+      promise
+        .then((encoded) => {
+          // A checkpoint may have landed mid-encode, in which case this body is
+          // already history and caching it would pin the ETag to stale bytes.
+          if (this.routeEtag() === etag) {
+            this.encodedMemo = encoded;
+          }
+        })
+        .catch((error) => logger.warn({ err: error.message }, 'Route geometry encode failed'))
+        .finally(() => {
+          if (this.encodingInFlight?.etag === etag) {
+            this.encodingInFlight = null;
+          }
+        });
+    }
+
+    return this.encodingInFlight.promise;
   }
 }
 

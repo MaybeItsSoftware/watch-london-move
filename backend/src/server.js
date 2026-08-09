@@ -1,3 +1,4 @@
+const compression = require('compression');
 const cors = require('cors');
 const express = require('express');
 const http = require('http');
@@ -33,12 +34,21 @@ const io = new Server(server, {
 app.use(
   cors({
     origin: corsOriginCheck,
-    // Cross-origin readers can only see this header if it is allow-listed.
-    exposedHeaders: ['X-Routes-Complete'],
+    // Cross-origin readers can only see these headers if they are allow-listed.
+    exposedHeaders: ['X-Routes-Complete', 'ETag'],
   }),
 );
 
-const store = new StateStore(config.tileSizeDeg);
+// engine.io claims /socket.io/ off the raw http server before Express is ever
+// reached, so this only ever sees the REST routes and cannot interfere with the
+// WebSocket upgrade. compression@1.8 negotiates br as well as gzip/deflate, and
+// skips any response that already carries a Content-Encoding — which is how
+// /routes gets to serve its own precompressed buffers straight through.
+if (config.httpCompression) {
+  app.use(compression({ threshold: config.httpCompressionThresholdBytes }));
+}
+
+const store = new StateStore(config.tileSizeDeg, config.arrivalRevisionMs);
 const tfl = new TflClient(config);
 const routeSequences = new RouteSequences(config, tfl);
 
@@ -122,11 +132,15 @@ function corsOriginCheck(origin, callback) {
  * and so a `full` can reconcile its own tile without touching the others.
  */
 function tilePayload(tile, vehicles, { kind, removedIds = [] }) {
-  const { tuples, dictionary } = encodeAll(vehicles);
+  // One instant for both: `time_to_station` is seconds relative to `generated_at`,
+  // so reading the clock twice would leave the countdowns describing a moment the
+  // payload does not claim to speak for.
+  const generatedAtMs = Date.now();
+  const { tuples, dictionary } = encodeAll(vehicles, generatedAtMs);
   return {
     schema: VEHICLE_SCHEMA,
     dict: dictionary,
-    generated_at: new Date().toISOString(),
+    generated_at: new Date(generatedAtMs).toISOString(),
     kind,
     tile,
     vehicles: tuples,
@@ -179,6 +193,7 @@ app.get('/health', (_req, res) => {
     metrics,
     routeLinesLoaded: routeSequences.getLoadedLineCount(),
     routeLoadComplete: routeSequences.isComplete(),
+    routeBuiltAt: routeSequences.getBuiltAt(),
     storeSize: metrics.storeSize,
     prunedTotal: metrics.prunedTotal,
     emitTick: metrics.emitTick,
@@ -192,6 +207,8 @@ app.get('/health', (_req, res) => {
       // takes roughly another 3x off this before it reaches the wire.
       bytesPerClientPerHourUncompressed: bytesPerClientPerHour(),
       compression: config.compression ? 'permessage-deflate' : 'off',
+      // Covers the REST side, which perMessageDeflate does not touch at all.
+      httpCompression: config.httpCompression ? 'gzip+br' : 'off',
     },
     tiles: {
       sizeDeg: config.tileSizeDeg,
@@ -213,11 +230,12 @@ app.get('/health', (_req, res) => {
 
 app.get('/snapshot', (req, res) => {
   const vehicles = store.getSnapshot();
-  const { tuples, dictionary } = encodeAll(vehicles);
+  const generatedAtMs = Date.now();
+  const { tuples, dictionary } = encodeAll(vehicles, generatedAtMs);
   res.json({
     schema: VEHICLE_SCHEMA,
     dict: dictionary,
-    generated_at: new Date().toISOString(),
+    generated_at: new Date(generatedAtMs).toISOString(),
     kind: 'full',
     tile: null,
     vehicles: tuples,
@@ -227,17 +245,142 @@ app.get('/snapshot', (req, res) => {
   });
 });
 
-app.get('/routes', (_req, res) => {
+// Stops in a box, for the markers the map draws at street zoom. Read straight
+// off the stop-point index the poller already maintains — no extra TfL traffic.
+app.get('/stops', (req, res) => {
+  const bbox = String(req.query.bbox || '').split(',').map(Number);
+  if (bbox.length !== 4 || bbox.some((value) => !Number.isFinite(value))) {
+    res.status(400).json({ error: 'bbox=west,south,east,north required' });
+    return;
+  }
+  const [west, south, east, north] = bbox;
+  const { stops, truncated } = tfl.getStopsInBounds({ west, south, east, north });
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json({ stops, truncated });
+});
+
+/**
+ * A conditional request may list several validators, and a proxy is allowed to
+ * weaken ours on the way through, so both sides are compared strong-agnostically.
+ */
+function ifNoneMatchHits(header, etag) {
+  if (!header) {
+    return false;
+  }
+  const wanted = etag.replace(/^W\//, '');
+  return header
+    .split(',')
+    .some((candidate) => candidate.trim().replace(/^W\//, '') === wanted || candidate.trim() === '*');
+}
+
+/**
+ * Server preference, not the client's. Browsers send "gzip, deflate, br, zstd"
+ * with every entry at q=1, and `req.acceptsEncodings('br', 'gzip')` resolves an
+ * equal-quality tie by the client's list order — which would hand a browser
+ * 644 KB of gzip when it can take 256 KB of brotli. Asked one at a time, q=0
+ * and an absent codec still exclude it properly. An absent header means "any",
+ * but a client that says nothing has not proven it can inflate anything.
+ */
+function pickRouteEncoding(req) {
+  if (!req.headers['accept-encoding']) {
+    return 'identity';
+  }
+  if (req.acceptsEncodings('br')) {
+    return 'br';
+  }
+  if (req.acceptsEncodings('gzip')) {
+    return 'gzip';
+  }
+  // Anything else (deflate, zstd) falls through to the compression middleware,
+  // which will negotiate it per request off the identity body.
+  return 'identity';
+}
+
+/**
+ * The whole network's geometry: 2.69 MB of JSON, and by a wide margin the
+ * largest thing this service serves. Three things keep it off the wire —
+ * precompressed bodies (256 KB brotli), a strong ETag so a revalidation is a
+ * 304 rather than a resend, and an immutable variant for a client that already
+ * knows which build it wants.
+ */
+app.get('/routes', async (req, res, next) => {
   if (!routeSequences.isLoaded()) {
     res.status(503).json({ status: 'loading' });
     return;
   }
+
+  let encoded;
+  try {
+    encoded = await routeSequences.getEncodedRoutes();
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  // Read off the encoded body rather than the live instance: a checkpoint can
+  // land between the await and here, and the headers must describe the bytes
+  // actually being sent.
+  const { complete, builtAt, etag } = encoded;
   // Building every bus route's geometry takes many minutes, so the response is
   // served partial and the client is told to come back for the rest.
-  const complete = routeSequences.isComplete();
-  res.set('Cache-Control', complete ? 'public, max-age=3600' : 'no-store');
   res.set('X-Routes-Complete', String(complete));
-  res.json(routeSequences.getRoutesGeoJSON());
+  res.set('ETag', etag);
+  // Appended, not assigned: cors has already put Origin here because the origin
+  // check is dynamic, and overwriting it would let a shared cache serve one
+  // origin's CORS headers to another.
+  res.vary('Accept-Encoding');
+
+  // ?v= addresses one specific build, so that URL's content can never change
+  // and the client never needs to revalidate. Only honoured when it names the
+  // build actually being served — otherwise a client that asked for last week's
+  // version would cache this week's under that URL for a week.
+  if (req.query.v !== undefined && String(req.query.v) === String(builtAt)) {
+    res.set('Cache-Control', 'public, max-age=604800, immutable');
+  } else if (complete) {
+    // The underlying data has a 7-day TTL and changes a few times a year, so
+    // the hourly expiry is about bounding staleness, not about the data moving.
+    // stale-while-revalidate keeps the refresh off the render path.
+    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+  } else {
+    res.set('Cache-Control', 'no-store');
+  }
+
+  if (ifNoneMatchHits(req.headers['if-none-match'], etag)) {
+    res.status(304).end();
+    return;
+  }
+
+  // Express's automatic weak ETag comes from res.json/res.send hashing the body;
+  // writing the buffer straight out skips that, which is the point — the ETag
+  // above is already set and the 2.69 MB never gets hashed per request.
+  const accepted = pickRouteEncoding(req);
+  const body = accepted === 'br' ? encoded.br : accepted === 'gzip' ? encoded.gzip : encoded.identity;
+  if (accepted !== 'identity') {
+    res.set('Content-Encoding', accepted);
+  }
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.set('Content-Length', String(body.length));
+  res.end(body);
+});
+
+/**
+ * Lets a client find out whether its cached geometry is current for the cost of
+ * a few dozen bytes, and hands it the `?v=` it needs to fetch the body from an
+ * immutable URL. `etag` is the literal header value, quotes included, so it can
+ * go straight back as If-None-Match.
+ */
+app.get('/routes/version', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!routeSequences.isLoaded()) {
+    res.status(503).json({ status: 'loading' });
+    return;
+  }
+  res.json({
+    builtAt: routeSequences.getBuiltAt(),
+    complete: routeSequences.isComplete(),
+    lines: routeSequences.getLoadedLineCount(),
+    etag: routeSequences.routeEtag(),
+  });
 });
 
 /**
