@@ -13,6 +13,12 @@
  *                        guaranteed visible — the mark is inset further still.
  *  - splash.png          Shown at the window's aspect ratio, cropped from the
  *                        centre, so the mark stays small and centred.
+ *
+ * It also writes the web app manifest's icons into public/. Those are a fourth
+ * crop again: an Android launcher applies its own mask to a `maskable` icon and
+ * only the middle 80% of it — the "safe zone" — is guaranteed to survive, so the
+ * maskable variant insets the mark further and paints the background itself,
+ * while the `any` variant is the plain square the desktop and the tab strip use.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -70,6 +76,12 @@ const outputs = [
   ['assets/splash-dark.png', await compose(2732, 640, { background: solid, disc: false })],
   // Home-screen icon for the web build.
   ['public/apple-touch-icon.png', await compose(180, 180, { background: solid, disc: true })],
+  // Web app manifest. 192 is the install prompt and the task switcher, 512 the
+  // splash Chrome synthesises from the manifest; both are required for an
+  // installable PWA. The maskable copy is inset to the 80% safe zone.
+  ['public/icon-192.png', await compose(192, 192, { background: solid, disc: false })],
+  ['public/icon-512.png', await compose(512, 512, { background: solid, disc: false })],
+  ['public/icon-maskable-512.png', await compose(512, 300, { background: solid, disc: false })],
 ];
 
 await mkdir(join(root, 'assets'), { recursive: true });
