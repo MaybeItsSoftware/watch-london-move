@@ -144,11 +144,27 @@ export type RenderVehicle = {
   segHint: number;
   /** `out` resumes at speed mid-path; `inout` departs a stop from rest. */
   easing: 'inout' | 'out';
-};
 
-/** A RenderVehicle with its interpolated pose for the current frame. */
-export type VehicleRow = RenderVehicle & {
+  // --- current frame's interpolated pose ---
+  //
+  // These live on the vehicle and are rewritten in place by `updateRow` rather
+  // than carried on a per-frame copy of it. The copy was `{...vehicle}` plus a
+  // fresh `position` array for every vehicle on every tick: at 6,500 vehicles
+  // and 60fps that is ~800,000 objects a second allocated to carry three
+  // numbers, and the GC pressure showed up as periodic frame drops on exactly
+  // the mid-range phones the app most needs to hold 30fps on.
+  //
+  // Safe because a row is only ever read synchronously — by the layer builder
+  // for the frame that just wrote it, and by deck.gl's accessors during that
+  // same `setProps`. Anything that needs to *keep* a pose (the info panel, the
+  // follow loop's target) goes through `VehiclesApi.getDisplayed`, which
+  // detaches a copy.
+
+  /** `[lon, lat, 0]`. The array identity is stable for the vehicle's lifetime;
+   *  only its contents change. */
   position: [number, number, number];
+  /** Displayed heading in degrees, eased between `fromHeading`/`toHeading` or
+   *  read off the route geometry. */
   heading: number;
   /** How long the arrival deadline has been in the past, 0 while en route. Only
    *  reachable once `legs` is empty — with a stop still queued the vehicle takes
@@ -156,6 +172,15 @@ export type VehicleRow = RenderVehicle & {
    *  of what TfL told us", not merely "between polls". */
   overdueMs: number;
 };
+
+/**
+ * A vehicle with its pose for the current frame. Now the same object: the pose
+ * fields moved onto `RenderVehicle` so a frame costs one array allocation
+ * instead of one object per vehicle. Kept as a distinct name because it is what
+ * every renderer and layer accessor is typed against, and because it still
+ * documents the contract — a row is only valid for the frame it was written in.
+ */
+export type VehicleRow = RenderVehicle;
 
 export type FilterKey = 'bus' | 'tube' | 'overground' | 'dlr' | 'tram' | 'elizabeth';
 

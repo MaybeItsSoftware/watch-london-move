@@ -222,18 +222,46 @@ function displayedPose(vehicle: RenderVehicle, now: number): Displayed {
   return poseAtT(vehicle, glideT(vehicle, now));
 }
 
-function toRow(vehicle: RenderVehicle, now: number): VehicleRow {
+/**
+ * Advance one vehicle to the frame at `now`, writing the pose onto the vehicle
+ * itself.
+ *
+ * In place, and deliberately: this used to return `{...vehicle}` with a fresh
+ * `position` array, which for a 6,500-vehicle fleet at 60fps is ~800,000 short-
+ * lived objects a second whose only job is to carry three numbers that the very
+ * next frame overwrites. The row *is* the vehicle now — see the pose fields on
+ * `RenderVehicle` — so a frame allocates one array for the list and nothing
+ * else.
+ *
+ * The rule that makes it safe: a row is valid only for the frame that wrote it.
+ * Everything on the render path reads it synchronously within that frame, and
+ * anything that keeps a pose across frames takes a detached copy from
+ * `getDisplayed`.
+ */
+function updateRow(vehicle: RenderVehicle, now: number): VehicleRow {
   const pose = displayedPose(vehicle, now);
   // Writing the segment hint back is a cache update, not state: `vehiclesRef` is
   // a plain mutable store rather than React state, and a hint left over from a
   // different frame costs one binary search and never a wrong position.
   vehicle.segHint = pose.segHint;
-  return {
-    ...vehicle,
-    position: [pose.lon, pose.lat, 0],
-    heading: pose.heading,
-    overdueMs: Math.max(0, now - vehicle.arrivesAt),
-  };
+  vehicle.position[0] = pose.lon;
+  vehicle.position[1] = pose.lat;
+  vehicle.heading = pose.heading;
+  vehicle.overdueMs = Math.max(0, now - vehicle.arrivesAt);
+  return vehicle;
+}
+
+/**
+ * The same pose, detached from the store.
+ *
+ * For the callers that outlive the frame — the info panel's 1Hz snapshot, the
+ * highlight effect — where handing back the live object would mean React
+ * comparing a value against itself and never re-rendering, and the vehicle's
+ * pose changing under a component that had already read it.
+ */
+function detachedRow(vehicle: RenderVehicle, now: number): VehicleRow {
+  updateRow(vehicle, now);
+  return { ...vehicle, position: [...vehicle.position] as [number, number, number] };
 }
 
 export type VehiclesApi = {
@@ -497,6 +525,12 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
           endS,
           segHint: 0,
           easing,
+          // Seeded from the glide's own origin so the vehicle is never briefly
+          // at [0, 0]; `updateRow` overwrites all three on the next frame,
+          // which is before anything can draw it.
+          position: [from[0], from[1], 0],
+          heading: fromHeading,
+          overdueMs: 0,
         });
 
         const history = historyRef.current.get(id) || [];
@@ -619,14 +653,22 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
   const rows = useMemo<VehicleRow[]>(() => {
     void tick; // rAF-driven: recompute the interpolated pose each frame.
     const now = Date.now();
-    return [...vehiclesRef.current.values()].map((vehicle) => toRow(vehicle, now));
+    // A fresh array, but the same vehicle objects: deck.gl decides an attribute
+    // needs re-uploading by comparing the `data` reference, so reusing one array
+    // across frames would freeze the fleet on screen. The array is one
+    // allocation; the 6,500 objects in it are not re-allocated.
+    const list: VehicleRow[] = [];
+    for (const vehicle of vehiclesRef.current.values()) {
+      list.push(updateRow(vehicle, now));
+    }
+    return list;
   }, [tick]);
 
   const api = useMemo<VehiclesApi>(
     () => ({
       getDisplayed(id: string) {
         const vehicle = vehiclesRef.current.get(id);
-        return vehicle ? toRow(vehicle, Date.now()) : null;
+        return vehicle ? detachedRow(vehicle, Date.now()) : null;
       },
       getHistory(id: string) {
         return historyRef.current.get(id) ?? [];
