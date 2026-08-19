@@ -21,6 +21,16 @@ current apps.
   and checkpointed to disk. See [`backend/DEPLOY.md`](backend/DEPLOY.md)
   for Fly.io deployment and cost model.
 
+  The whole-network bus feed — one request covering all ~640 routes, and
+  ~80 MB of JSON in reply — is fetched, parsed and reduced on a worker
+  thread ([`bus-feed-worker.js`](backend/src/bus-feed-worker.js)); only
+  the few thousand canonical records cross back. Read on the main thread
+  it stalled every connected client for the length of a `JSON.parse`,
+  measured at 107 ms for a 25 MB stand-in and considerably worse on the
+  shared vCPU this deploys to. `BUS_FEED_WORKER=false` runs the identical
+  code in process, which is also the automatic fallback if the thread
+  cannot start; `/health` reports which is in use.
+
   The last tuple field is the vehicle's `schedule`: the stops *after* the
   one it is currently heading for, flattened to `[lat, lon, secs]`
   triples, `secs` being relative to the payload's `generated_at` exactly
@@ -53,6 +63,22 @@ current apps.
   Models are generated, not authored — run `npm run models` in
   `frontend/` after editing
   [`scripts/generate-models/`](frontend/scripts/generate-models/).
+
+  On the web it is also an installable PWA: a hand-written service worker
+  ([`public/sw.js`](frontend/public/sw.js)) caches the shell, the chunks
+  and the bundled data, and
+  [`public/manifest.webmanifest`](frontend/public/manifest.webmanifest)
+  is what makes that reachable as an installed app on Android, desktop
+  Chrome and iOS home screens. Icons come from the same roundel as the
+  native ones — `npm run icons`.
+
+## Performance
+
+[`PERFORMANCE.md`](PERFORMANCE.md) is a measured audit of both apps: what
+the per-frame and per-poll costs actually are, what was changed in
+response, and a ranked backlog of what is left. Read it before optimising
+anything here — several things that look wasteful are deliberate, and the
+reasons are recorded.
 
 ## Bundled static data
 
