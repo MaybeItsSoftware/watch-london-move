@@ -117,6 +117,12 @@ module.exports = {
   // checkpointed to disk this often and resumes there after a restart.
   routeCheckpointEvery: Math.max(1, Number(process.env.ROUTE_CHECKPOINT_EVERY || 5)),
   routeSimplifyToleranceDeg: Number(process.env.ROUTE_SIMPLIFY_TOLERANCE_DEG || 0.00008),
+  // The whole-network bus feed's request, its ~80MB JSON.parse and the reduce
+  // over ~120,000 rows all run on a worker thread, so a poll no longer stalls
+  // every connected client for the duration. Set to `false` to run it in
+  // process — the code path is identical, it just blocks the event loop. See
+  // bus-feed-worker.js.
+  busFeedWorker: process.env.BUS_FEED_WORKER !== 'false',
   // socket.io leaves permessage-deflate off by default. These payloads are
   // repetitive JSON with clustered coordinates and compress about 6-8x, which
   // on a workload that is almost entirely egress is worth the CPU.

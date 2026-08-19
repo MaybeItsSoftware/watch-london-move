@@ -2,6 +2,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const { Worker, isMainThread } = require('worker_threads');
 const { canonicalizeStationName } = require('./canonicalization');
 const { vehicleTypeForLine } = require('./lines');
 
@@ -62,6 +63,112 @@ class TflClient {
     this.stopPoints = new Map();
     this.stopPointsExpiresAt = 0;
     this.stopPointsInFlight = null;
+    // Bumped whenever the index is replaced, so the worker thread can tell
+    // whether its mirror is current without comparing 33,000 entries.
+    this.stopsEpoch = 0;
+
+    // See bus-feed-worker.js. Spawned lazily on the first whole-network poll
+    // rather than at construction: a deployment tracking a named subset of
+    // routes never uses the mode endpoint and should not carry a second thread
+    // for it, and the worker is useless before the stop index exists anyway.
+    this.busWorker = null;
+    this.busWorkerEpoch = -1;
+    this.busWorkerPending = new Map();
+    this.busWorkerRequestId = 0;
+    this.busWorkerDisabled = false;
+    this.busWorkerClosing = false;
+  }
+
+  /**
+   * The worker thread, spawned on first use. Returns null when the worker is
+   * turned off or has failed, which is the signal to run the feed in process.
+   *
+   * A failure disables it permanently rather than retrying: the reasons a worker
+   * cannot start (no `worker_threads`, a missing file, a memory ceiling) do not
+   * heal between polls, and retrying every cycle would add a spawn to the very
+   * path this exists to keep quiet.
+   */
+  ensureBusWorker() {
+    if (this.busWorkerDisabled || !this.config.busFeedWorker || !isMainThread) {
+      return null;
+    }
+    if (this.busWorker) {
+      return this.busWorker;
+    }
+
+    try {
+      const worker = new Worker(path.join(__dirname, 'bus-feed-worker.js'), {
+        workerData: { config: this.config },
+      });
+      // Unref'd so a stuck 60-second feed request can never hold the process
+      // open past the platform's kill timeout. The server's emit interval is a
+      // module-level timer, so the event loop is never resting on this alone.
+      worker.unref();
+      worker.on('message', ({ requestId, vehicles, error }) => {
+        const pending = this.busWorkerPending.get(requestId);
+        if (!pending) {
+          return;
+        }
+        this.busWorkerPending.delete(requestId);
+        if (error) {
+          pending.reject(new Error(error));
+        } else {
+          pending.resolve(vehicles);
+        }
+      });
+      worker.on('error', (error) => this.failBusWorker(error));
+      worker.on('exit', (code) => {
+        // `terminate()` resolves with a non-zero code, so a shutdown would
+        // otherwise log itself as a failure on the way out.
+        if (code !== 0 && !this.busWorkerClosing) {
+          this.failBusWorker(new Error(`bus feed worker exited with code ${code}`));
+        }
+      });
+      this.busWorker = worker;
+      logger.info('Bus feed worker started');
+      return worker;
+    } catch (error) {
+      this.failBusWorker(error);
+      return null;
+    }
+  }
+
+  /** Tear the worker down and fall back to the in-process path from here on. */
+  failBusWorker(error) {
+    if (this.busWorkerDisabled) {
+      return;
+    }
+    this.busWorkerDisabled = true;
+    logger.warn({ err: error?.message }, 'Bus feed worker failed; falling back to in-process parsing');
+    for (const pending of this.busWorkerPending.values()) {
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    this.busWorkerPending.clear();
+    const worker = this.busWorker;
+    this.busWorker = null;
+    this.busWorkerEpoch = -1;
+    worker?.terminate().catch(() => {});
+  }
+
+  /** For `/health`: `off` was never asked for, `fallback` means it was and could
+   *  not be had, which is worth being able to see rather than infer from a stall. */
+  busFeedWorkerState() {
+    if (!this.config.busFeedWorker) {
+      return 'off';
+    }
+    if (this.busWorkerDisabled) {
+      return 'fallback';
+    }
+    return this.busWorker ? 'running' : 'idle';
+  }
+
+  /** Called from the server's shutdown path so a stuck fetch cannot hold the
+   *  process open past the platform's kill timeout. */
+  close() {
+    const worker = this.busWorker;
+    this.busWorkerClosing = true;
+    this.busWorker = null;
+    return worker ? worker.terminate().then(() => undefined) : Promise.resolve();
   }
 
   getStopPointCount() {
@@ -200,6 +307,7 @@ class TflClient {
     const cached = this.readStopPointCache();
     if (cached) {
       this.stopPoints = cached.index;
+      this.stopsEpoch += 1;
       this.stopPointsExpiresAt = cached.builtAt + this.config.stopPointCacheMs;
       logger.info({ stops: cached.index.size }, 'Stop point index loaded from cache');
       return this.stopPoints;
@@ -243,6 +351,7 @@ class TflClient {
     }
 
     this.stopPoints = index;
+    this.stopsEpoch += 1;
     // Only persist and fully trust a complete index — a partial one would freeze
     // its gaps in place for the whole TTL, so retry it soon instead.
     const complete = failedLines.length === 0 && busStopsComplete;
@@ -570,10 +679,53 @@ class TflClient {
     };
   }
 
-  // One request for every bus in London. The response is large (~90MB of JSON,
-  // ~8MB gzipped, a few hundred ms to parse) but it replaces the ~130 per-line
-  // requests the same coverage would otherwise cost each cycle.
+  /**
+   * One request for every bus in London. The response replaces the ~130 per-line
+   * requests the same coverage would otherwise cost each cycle, but it is ~80MB
+   * of JSON — a `JSON.parse` that blocks the event loop for 180ms on a fast
+   * laptop and appreciably longer on a shared vCPU, plus a reduce over ~120,000
+   * rows, on a cadence every connected client would feel as a stall.
+   *
+   * So by default none of it happens here: the request, the parse and the reduce
+   * are all done in a worker thread and only the few thousand canonical records
+   * come back. `BUS_FEED_WORKER=false`, or any failure to start the thread, runs
+   * the identical code in process instead.
+   */
   async fetchAllBusArrivals(stopPoints, fetchedAtMs) {
+    const worker = this.ensureBusWorker();
+    if (!worker) {
+      return this.fetchAllBusArrivalsInProcess(stopPoints, fetchedAtMs);
+    }
+
+    // The mirror is only re-sent when the index has actually been rebuilt, which
+    // is about once a day: it is ~33,000 entries, and a structured clone of that
+    // on every poll would put back a good part of the main-thread cost this is
+    // here to remove.
+    if (this.busWorkerEpoch !== this.stopsEpoch) {
+      worker.postMessage({ type: 'stops', epoch: this.stopsEpoch, entries: [...stopPoints] });
+      this.busWorkerEpoch = this.stopsEpoch;
+    }
+
+    const requestId = (this.busWorkerRequestId += 1);
+    const result = new Promise((resolve, reject) => {
+      this.busWorkerPending.set(requestId, { resolve, reject });
+    });
+    worker.postMessage({ type: 'fetch', requestId, fetchedAtMs, epoch: this.stopsEpoch });
+
+    try {
+      return await result;
+    } catch (error) {
+      // A worker that answered with an error is still healthy — a 429 from TfL
+      // reaches us this way — so this does not disable it. The caller already
+      // treats a throw here as "keep the previous snapshot".
+      this.busWorkerPending.delete(requestId);
+      throw error;
+    }
+  }
+
+  /** The whole-network feed, read on whichever thread calls this. Invoked
+   *  directly by bus-feed-worker.js, and by the dispatcher above as a fallback. */
+  async fetchAllBusArrivalsInProcess(stopPoints, fetchedAtMs) {
     const arrivals = await this.getJsonWithRetry(
       '/Mode/bus/Arrivals?count=-1',
       this.config.retryCount,

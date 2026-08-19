@@ -191,6 +191,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     metrics,
+    busFeedWorker: tfl.busFeedWorkerState(),
     routeLinesLoaded: routeSequences.getLoadedLineCount(),
     routeLoadComplete: routeSequences.isComplete(),
     routeBuiltAt: routeSequences.getBuiltAt(),
@@ -590,6 +591,11 @@ function shutdown(signal) {
   if (pollTimer) {
     clearTimeout(pollTimer);
   }
+  // The bus feed worker holds an axios request that can legitimately be 60s
+  // long; it is unref'd so it never keeps the process alive on its own, but
+  // terminating it explicitly stops it doing pointless work while the server
+  // drains.
+  tfl.close().catch(() => {});
   io.close(() => {
     server.close(() => process.exit(0));
   });
