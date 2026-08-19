@@ -908,10 +908,27 @@ function App() {
     return result;
   }, [lines]);
 
-  const selectedVehicle = useMemo(
-    () => (selectedId ? (rows.find((row) => row.id === selectedId) ?? null) : null),
-    [rows, selectedId],
-  );
+  // Everything the panels display is measured in whole seconds — a countdown, an
+  // "updated Ns ago" — so they are clocked at 1Hz rather than at the animation
+  // frame rate. Two things fall out of that. The panels stop re-rendering sixty
+  // times a second to draw the same string, and with their props now stable
+  // between seconds the memoised components below can actually bail out, which
+  // is what keeps the sidebar's several-hundred-row list out of every frame.
+  const [nowSecond, setNowSecond] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSecond(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // A Map lookup on the same 1Hz clock, not `rows.find` on every frame: the scan
+  // was 6,500 string comparisons a frame to locate one vehicle, and it handed
+  // back a live row whose pose the next frame would rewrite underneath the panel
+  // holding it. `getDisplayed` detaches a copy.
+  const selectedVehicle = useMemo(() => {
+    void nowSecond; // clock-driven: re-read the pose once a second.
+    return selectedId ? api.getDisplayed(selectedId) : null;
+  }, [selectedId, nowSecond, api]);
 
   // Destination and next stop ride with the selection, not the fleet. Refreshed
   // on a timer because the next stop changes as the vehicle travels.
@@ -977,6 +994,23 @@ function App() {
       previous.length === 1 && previous[0] === focusLine ? [] : [focusLine],
     );
   }, [focusLine]);
+
+  // Stable identities for everything handed to the memoised panels. An inline
+  // arrow here is a new function on every one of the app's ~60 renders a second,
+  // which would make every `memo` comparison fail and put the sidebar's whole
+  // line list back into the frame.
+  const toggleSidebar = useCallback(() => setSidebarOpen((value) => !value), []);
+  const toggleMode = useCallback((key: FilterKey) => {
+    setFilters((previous) => ({ ...previous, [key]: !previous[key] }));
+  }, []);
+  const toggleLine = useCallback((id: string) => {
+    setSelectedLines((previous) =>
+      previous.includes(id) ? previous.filter((value) => value !== id) : [...previous, id],
+    );
+  }, []);
+  const clearLines = useCallback(() => setSelectedLines([]), []);
+  const toggleRoutes = useCallback(() => setShowRoutes((value) => !value), []);
+  const toggleFollow = useCallback(() => setFollowing((value) => !value), []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1134,31 +1168,23 @@ function App() {
     return () => cancelAnimationFrame(frame);
   }, [following, selectedId, mapReady, api]);
 
-  const now = Date.now();
-
   return (
     <div className="app-shell" data-basemap={phase}>
       <div className="map" ref={mapContainerRef} />
       <Sidebar
         open={sidebarOpen}
-        onToggleOpen={() => setSidebarOpen((value) => !value)}
+        onToggleOpen={toggleSidebar}
         search={search}
         onSearchChange={setSearch}
         filters={filters}
         modeCounts={modeCounts}
-        onToggleMode={(key) => setFilters((previous) => ({ ...previous, [key]: !previous[key] }))}
+        onToggleMode={toggleMode}
         lines={lines}
         selectedLines={selectedLines}
-        onToggleLine={(id) =>
-          setSelectedLines((previous) =>
-            previous.includes(id)
-              ? previous.filter((value) => value !== id)
-              : [...previous, id],
-          )
-        }
-        onClearLines={() => setSelectedLines([])}
+        onToggleLine={toggleLine}
+        onClearLines={clearLines}
         showRoutes={showRoutes}
-        onToggleRoutes={() => setShowRoutes((value) => !value)}
+        onToggleRoutes={toggleRoutes}
         basemapMode={basemapMode}
         onBasemapModeChange={setBasemapMode}
       />
@@ -1166,9 +1192,9 @@ function App() {
         <InfoPanel
           vehicle={selectedVehicle}
           detail={selectedDetail}
-          now={now}
+          now={nowSecond}
           following={following}
-          onToggleFollow={() => setFollowing((value) => !value)}
+          onToggleFollow={toggleFollow}
           routeIsolated={isolatedRoute}
           onToggleIsolateRoute={toggleIsolateRoute}
           onClose={clearSelection}
@@ -1178,7 +1204,7 @@ function App() {
         status={connectionStatus}
         vehicleCount={visibleRows.length}
         lastPayloadAt={lastPayloadAt}
-        now={now}
+        now={nowSecond}
         shifted={sidebarOpen}
       />
     </div>

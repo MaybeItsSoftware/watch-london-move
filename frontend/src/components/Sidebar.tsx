@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import { FILTER_COLORS, FILTER_LABELS, FILTER_ORDER } from '../config';
 import type { BasemapMode } from '../config';
 import type { FilterKey, LineSummary } from '../types';
@@ -57,7 +57,16 @@ function matches(line: LineSummary, needle: string): boolean {
   );
 }
 
-export function Sidebar({
+/**
+ * Memoised. The app re-renders at the animation frame rate — the whole fleet's
+ * pose is re-derived every frame — and this component's subtree is the largest
+ * in the app: on a wide view the line list is several hundred rows. None of it
+ * depends on the frame clock, so the memo turns a per-frame reconciliation of
+ * that list into one per change of the props below. Every callback prop is
+ * stabilised with `useCallback` in App.tsx for exactly this reason; passing an
+ * inline arrow would defeat the comparison.
+ */
+export const Sidebar = memo(function Sidebar({
   open,
   onToggleOpen,
   search,
@@ -187,4 +196,4 @@ export function Sidebar({
       </div>
     </aside>
   );
-}
+});

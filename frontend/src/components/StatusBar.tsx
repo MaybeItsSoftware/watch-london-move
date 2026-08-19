@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { ConnectionStatus } from '../types';
 
 type StatusBarProps = {
@@ -15,7 +16,16 @@ const STATUS_LABELS: Record<ConnectionStatus, string> = {
   disconnected: 'Disconnected',
 };
 
-export function StatusBar({ status, vehicleCount, lastPayloadAt, now, shifted }: StatusBarProps) {
+/** Memoised, and clocked at 1Hz from App: `now` used to be `Date.now()` read
+ *  during a render that happens sixty times a second, so this re-rendered
+ *  every frame to print the same two strings. */
+export const StatusBar = memo(function StatusBar({
+  status,
+  vehicleCount,
+  lastPayloadAt,
+  now,
+  shifted,
+}: StatusBarProps) {
   const ageSeconds =
     lastPayloadAt == null ? null : Math.max(0, Math.floor((now - lastPayloadAt) / 1000));
 
@@ -29,4 +39,4 @@ export function StatusBar({ status, vehicleCount, lastPayloadAt, now, shifted }:
       </span>
     </div>
   );
-}
+});

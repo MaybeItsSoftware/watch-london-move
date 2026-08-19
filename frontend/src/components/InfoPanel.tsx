@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { lineSwatchHex } from '../config';
 import type { VehicleDetail, VehicleRow } from '../types';
 
@@ -47,7 +48,10 @@ function formatCountdown(seconds: number, overdueMs: number): string {
   return minutes > 0 ? `in ${minutes}m ${rest}s` : `in ${rest}s`;
 }
 
-export function InfoPanel({
+/** Memoised. Its `vehicle` and `now` props are both refreshed on App's 1Hz
+ *  clock rather than per frame — a countdown in whole seconds has nothing to
+ *  say at 60fps — so this now renders once a second instead of sixty times. */
+export const InfoPanel = memo(function InfoPanel({
   vehicle,
   detail,
   now,
@@ -107,4 +111,4 @@ export function InfoPanel({
       </div>
     </div>
   );
-}
+});
