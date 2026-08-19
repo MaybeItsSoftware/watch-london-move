@@ -52,6 +52,33 @@ const RESUME_EPSILON_M = 5;
 // Transit correction is a lag estimate, not a licence to shift a deadline far.
 const MAX_TRANSIT_MS = 5000;
 
+// --- adaptive frame pacing -------------------------------------------------
+//
+// See the rAF effect below. The tick rate is closed-loop on the frame intervals
+// the browser actually delivers, rather than fixed at TARGET_FPS and hoped for.
+
+/** Frames per decision window. At 60fps this is a judgement a second. */
+const FRAME_WINDOW = 60;
+/** A frame taking this much longer than the display's period is one it missed. */
+const SLOW_FRAME_RATIO = 1.75;
+/** Share of a window that must be slow before the tick rate steps down... */
+const DEGRADE_ABOVE = 0.3;
+/** ...and the share it must stay under to earn a step back up. */
+const RECOVER_BELOW = 0.05;
+/** Consecutive clean windows required to step up. Asymmetric on purpose. */
+const RECOVER_WINDOWS = 3;
+/** Each step is this multiple of the current period, so the loop converges in a
+ *  few windows rather than crawling. */
+const PACE_STEP = 1.5;
+/** Below this the map reads as a slideshow; better to drop detail than frames,
+ *  which is what the zoom bands in layers.ts already do. */
+const MIN_TICK_FPS = 15;
+/** rAF is vsync-locked, so anything under this is a measurement artefact and
+ *  must not be allowed to set the learned display period. 240Hz is 4.2ms. */
+const MIN_PLAUSIBLE_FRAME_MS = 3;
+/** Above this the page was not running: a background tab, a slept device. */
+const MAX_PLAUSIBLE_FRAME_MS = 250;
+
 /**
  * Plausible top speeds, in metres per second, by vehicle type.
  *
@@ -628,13 +655,72 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
       return;
     }
 
-    const minFrameMs = 1000 / TARGET_FPS;
+    // TARGET_FPS is a ceiling, chosen from the pointer type — which says what
+    // kind of device this is and nothing about what it can sustain. A 2019
+    // Android and a current flagship are both `pointer: coarse`, and re-deriving
+    // 6,500 poses and re-uploading deck.gl's attributes is by a distance the
+    // frame's dominant cost. When a device cannot hold the ceiling, asking for
+    // fewer frames is strictly better than queueing work the compositor then
+    // drops: interpolation is time-based, so a lower rate costs smoothness and
+    // nothing else, while a saturated main thread costs input latency too.
+    const fastestPeriodMs = 1000 / TARGET_FPS;
+    const slowestPeriodMs = 1000 / MIN_TICK_FPS;
+    let tickPeriodMs = fastestPeriodMs;
+
+    // The display's own frame period, learned rather than assumed, so a 120Hz
+    // phone and a 60Hz laptop are read on the same scale. rAF is vsync-locked,
+    // so the shortest interval a session ever sees is that period.
+    let displayPeriodMs = Infinity;
+    let framesInWindow = 0;
+    let slowFramesInWindow = 0;
+    // Degrade on one bad window, recover only after several good ones: the two
+    // are deliberately asymmetric, or the loop would step up the instant its own
+    // throttling had relieved the pressure and spend every other second dropping
+    // frames again.
+    let goodWindows = 0;
+
     let frame = 0;
+    let lastFrameAt = 0;
     let lastTickAt = 0;
 
     const animate = (now: number) => {
       frame = window.requestAnimationFrame(animate);
-      if (now - lastTickAt < minFrameMs) {
+
+      const interval = lastFrameAt === 0 ? 0 : now - lastFrameAt;
+      lastFrameAt = now;
+
+      // A backgrounded tab or a slept device resumes with a gap of seconds.
+      // That is an absence of frames, not a dropped one, and letting it into the
+      // window would clamp a healthy device to the floor on every resume.
+      if (interval > MIN_PLAUSIBLE_FRAME_MS && interval < MAX_PLAUSIBLE_FRAME_MS) {
+        if (interval < displayPeriodMs) {
+          displayPeriodMs = interval;
+        }
+        framesInWindow += 1;
+        if (interval > displayPeriodMs * SLOW_FRAME_RATIO) {
+          slowFramesInWindow += 1;
+        }
+
+        if (framesInWindow >= FRAME_WINDOW) {
+          const slowShare = slowFramesInWindow / framesInWindow;
+          if (slowShare > DEGRADE_ABOVE) {
+            tickPeriodMs = Math.min(tickPeriodMs * PACE_STEP, slowestPeriodMs);
+            goodWindows = 0;
+          } else if (slowShare < RECOVER_BELOW) {
+            goodWindows += 1;
+            if (goodWindows >= RECOVER_WINDOWS) {
+              tickPeriodMs = Math.max(tickPeriodMs / PACE_STEP, fastestPeriodMs);
+              goodWindows = 0;
+            }
+          } else {
+            goodWindows = 0;
+          }
+          framesInWindow = 0;
+          slowFramesInWindow = 0;
+        }
+      }
+
+      if (now - lastTickAt < tickPeriodMs) {
         return;
       }
       lastTickAt = now;
