@@ -1,6 +1,8 @@
 const compression = require('compression');
 const cors = require('cors');
+const crypto = require('crypto');
 const express = require('express');
+const helmet = require('helmet');
 const http = require('http');
 const pino = require('pino');
 const { Server } = require('socket.io');
@@ -10,9 +12,21 @@ const { StateStore } = require('./state-store');
 const { RouteSequences } = require('./route-sequences');
 const { VEHICLE_SCHEMA, encodeAll, toDetail } = require('./schema');
 const { ALL_ROOM, roomForTile, tileKeysForBounds } = require('./tiles');
+const { RateLimiter, httpRateLimit, socketClientKey } = require('./rate-limit');
 
 const logger = pino({ name: 'watch-london-backend' });
+
+// Defaults that are safe on a laptop and wrong in a deployment, where the
+// symptom is silence rather than an error. See config.js.
+for (const warning of config.warnings) {
+  logger.warn({ configWarning: true }, warning);
+}
+
 const app = express();
+
+// Must precede anything that reads req.ip — the rate limiter buckets on it,
+// and behind a platform router the socket peer is the proxy, not the client.
+app.set('trust proxy', config.trustProxy);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -32,6 +46,19 @@ const io = new Server(server, {
 });
 
 app.use(
+  helmet({
+    // No HTML is served from this origin, so a document-oriented CSP has
+    // nothing here to protect. The frontend is a separate static host and
+    // carries its own policy.
+    contentSecurityPolicy: false,
+    // Cross-origin reads are the entire point: helmet's same-origin default
+    // would undo the CORS layer below and lock out both the web app and the
+    // Capacitor WebViews, whose origins are not even http ones.
+    crossOriginResourcePolicy: false,
+  }),
+);
+
+app.use(
   cors({
     origin: corsOriginCheck,
     // Cross-origin readers can only see these headers if they are allow-listed.
@@ -47,6 +74,32 @@ app.use(
 if (config.httpCompression) {
   app.use(compression({ threshold: config.httpCompressionThresholdBytes }));
 }
+
+// Egress is the whole bill, so the cheap-to-ask/expensive-to-serve paths get
+// a budget. Separate buckets rather than one shared pool: a client panning the
+// map hard should not lose its ability to ask for vehicle details.
+const limiters = {
+  http: new RateLimiter({
+    capacity: config.rateLimit.httpCapacity,
+    refillPerSec: config.rateLimit.httpRefillPerSec,
+  }),
+  full: new RateLimiter({
+    capacity: config.rateLimit.fullCapacity,
+    refillPerSec: config.rateLimit.fullRefillPerSec,
+  }),
+  viewport: new RateLimiter({
+    capacity: config.rateLimit.viewportCapacity,
+    refillPerSec: config.rateLimit.viewportRefillPerSec,
+  }),
+  details: new RateLimiter({
+    capacity: config.rateLimit.detailsCapacity,
+    refillPerSec: config.rateLimit.detailsRefillPerSec,
+  }),
+};
+
+// Live socket count per address, so one client cannot buy itself more budget
+// by opening more connections.
+const socketsByIp = new Map();
 
 const store = new StateStore(config.tileSizeDeg, config.arrivalRevisionMs);
 const tfl = new TflClient(config);
@@ -74,6 +127,8 @@ const metrics = {
   lastTickFanoutBytes: 0,
   totalFanoutBytes: 0,
   detailRequests: 0,
+  throttledMessages: 0,
+  refusedConnections: 0,
 };
 
 // Traffic is bursty — a tile only changes when a poll lands in it — so a single
@@ -187,9 +242,45 @@ function sendVisibleFull(socket) {
   }
 }
 
-app.get('/health', (_req, res) => {
+/**
+ * Constant-time comparison of two secrets of unequal length.
+ *
+ * timingSafeEqual throws unless both buffers are the same size, and padding
+ * to a common length would leak that length through the comparison itself, so
+ * both sides are hashed to a fixed 32 bytes first.
+ */
+function secretEquals(supplied, expected) {
+  const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
+  return crypto.timingSafeEqual(digest(supplied), digest(expected));
+}
+
+/**
+ * Bandwidth (and therefore hosting cost), poll timings, failed lines and the
+ * allowed-origin list are operator data. They used to be public on /health,
+ * which is also the endpoint the platform health check polls — so it cannot
+ * simply be locked. Liveness stays open; the detail needs METRICS_TOKEN.
+ *
+ * With no token set the full body is returned in development and withheld in
+ * production, so a deploy that forgets to configure one fails closed.
+ */
+function metricsAuthorized(req) {
+  if (!config.metricsToken) {
+    return !config.isProduction;
+  }
+  const header = req.get('authorization') || '';
+  const supplied = header.startsWith('Bearer ') ? header.slice(7) : String(req.query.token || '');
+  return supplied.length > 0 && secretEquals(supplied, config.metricsToken);
+}
+
+app.get('/health', httpRateLimit(limiters.http), (req, res) => {
+  // Deliberately cheap and unauthenticated: this is the platform health check.
+  if (!metricsAuthorized(req)) {
+    res.json({ status: 'ok', uptimeSec: Math.round(process.uptime()) });
+    return;
+  }
   res.json({
     status: 'ok',
+    uptimeSec: Math.round(process.uptime()),
     metrics,
     busFeedWorker: tfl.busFeedWorkerState(),
     routeLinesLoaded: routeSequences.getLoadedLineCount(),
@@ -226,13 +317,27 @@ app.get('/health', (_req, res) => {
       fullEmitEveryN: config.fullEmitEveryN,
       maxViewportTiles: config.maxViewportTiles,
     },
+    limits: {
+      maxConnections: config.maxConnections,
+      maxConnectionsPerIp: config.maxConnectionsPerIp,
+      distinctClientAddresses: socketsByIp.size,
+      refusedConnections: metrics.refusedConnections,
+      throttledMessages: metrics.throttledMessages,
+    },
   });
 });
 
-app.get('/snapshot', (req, res) => {
+// The entire fleet in one response, and trivially cheap to ask for, so it
+// carries by far the heaviest per-request cost. The app itself never calls it
+// — live data arrives over the socket — so the budget only has to leave room
+// for the occasional manual inspection.
+app.get('/snapshot', httpRateLimit(limiters.http, { cost: 20 }), (req, res) => {
   const vehicles = store.getSnapshot();
   const generatedAtMs = Date.now();
   const { tuples, dictionary } = encodeAll(vehicles, generatedAtMs);
+  // Within one emit interval, so anything caching in front of this serves a
+  // repeat rather than paying for the fleet twice.
+  res.set('Cache-Control', 'public, max-age=5');
   res.json({
     schema: VEHICLE_SCHEMA,
     dict: dictionary,
@@ -241,14 +346,17 @@ app.get('/snapshot', (req, res) => {
     tile: null,
     vehicles: tuples,
     removed_ids: [],
-    // Debugging aid only — the socket feed serves these per selection.
-    ...(req.query.details === '1' ? { details: vehicles.map(toDetail) } : {}),
+    // Debugging aid only — the socket feed serves these per selection — and it
+    // roughly triples the response, so it is operator-gated like /health.
+    ...(req.query.details === '1' && metricsAuthorized(req)
+      ? { details: vehicles.map(toDetail) }
+      : {}),
   });
 });
 
 // Stops in a box, for the markers the map draws at street zoom. Read straight
 // off the stop-point index the poller already maintains — no extra TfL traffic.
-app.get('/stops', (req, res) => {
+app.get('/stops', httpRateLimit(limiters.http, { cost: 2 }), (req, res) => {
   const bbox = String(req.query.bbox || '').split(',').map(Number);
   if (bbox.length !== 4 || bbox.some((value) => !Number.isFinite(value))) {
     res.status(400).json({ error: 'bbox=west,south,east,north required' });
@@ -304,7 +412,7 @@ function pickRouteEncoding(req) {
  * 304 rather than a resend, and an immutable variant for a client that already
  * knows which build it wants.
  */
-app.get('/routes', async (req, res, next) => {
+app.get('/routes', httpRateLimit(limiters.http, { cost: 10 }), async (req, res, next) => {
   if (!routeSequences.isLoaded()) {
     res.status(503).json({ status: 'loading' });
     return;
@@ -370,7 +478,7 @@ app.get('/routes', async (req, res, next) => {
  * immutable URL. `etag` is the literal header value, quotes included, so it can
  * go straight back as If-None-Match.
  */
-app.get('/routes/version', (_req, res) => {
+app.get('/routes/version', httpRateLimit(limiters.http), (_req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!routeSequences.isLoaded()) {
     res.status(503).json({ status: 'loading' });
@@ -431,8 +539,71 @@ function applyViewport(socket, bounds) {
   }
 }
 
+/**
+ * Express 5 routes a rejected async handler here on its own. Explicit rather
+ * than left to Express's built-in handler so the failure is logged in the same
+ * structured form as everything else, and so the body never varies with
+ * NODE_ENV — the default handler includes the stack outside production, which
+ * is a surprising thing to find yourself serving from a staging deploy.
+ */
+app.use((error, req, res, _next) => {
+  logger.error({ err: error, path: req.path }, 'Request failed');
+  if (res.headersSent) {
+    return;
+  }
+  res.status(500).json({ error: 'internal error' });
+});
+
+/**
+ * Admission control. Fan-out is single-threaded, so past a few hundred sockets
+ * the TLS and write work saturates one core and everyone's updates slow down;
+ * refusing a connection is kinder than degrading every existing one. fly.toml
+ * used to enforce this with hard_limit = 400 and Railway has no equivalent, so
+ * the process now enforces its own.
+ */
+io.use((socket, next) => {
+  const clientKey = socketClientKey(socket, config.trustProxy > 0);
+  socket.data.clientKey = clientKey;
+
+  if (metrics.connectedClients >= config.maxConnections) {
+    metrics.refusedConnections += 1;
+    logger.warn(
+      { clientKey, connectedClients: metrics.connectedClients },
+      'Refused connection: at capacity',
+    );
+    next(new Error('server at capacity'));
+    return;
+  }
+
+  if ((socketsByIp.get(clientKey) ?? 0) >= config.maxConnectionsPerIp) {
+    metrics.refusedConnections += 1;
+    logger.warn({ clientKey }, 'Refused connection: per-address limit');
+    next(new Error('too many connections'));
+    return;
+  }
+
+  next();
+});
+
+/**
+ * Spends one token of a socket's budget. A refused message is dropped rather
+ * than answered, because every throttled event here is a "send me data"
+ * request and the honest response to too many of them is not to send it.
+ * Buckets are keyed by address, not by socket, so opening more connections
+ * buys no extra budget.
+ */
+function allow(socket, limiter, event) {
+  if (limiter.take(socket.data.clientKey)) {
+    return true;
+  }
+  metrics.throttledMessages += 1;
+  logger.warn({ socketId: socket.id, clientKey: socket.data.clientKey, event }, 'Throttled');
+  return false;
+}
+
 io.on('connection', (socket) => {
   metrics.connectedClients += 1;
+  socketsByIp.set(socket.data.clientKey, (socketsByIp.get(socket.data.clientKey) ?? 0) + 1);
   // Until a viewport arrives the client sees the whole network, so a client
   // that never sends one behaves exactly as it did before tiles existed.
   socket.data.tiles = null;
@@ -457,6 +628,9 @@ io.on('connection', (socket) => {
   }, config.viewportGraceMs);
 
   socket.on('viewport:set', (bounds) => {
+    if (!allow(socket, limiters.viewport, 'viewport:set')) {
+      return;
+    }
     if (socket.data.graceTimer) {
       clearTimeout(socket.data.graceTimer);
       socket.data.graceTimer = null;
@@ -468,7 +642,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // A tiny message in, a per-tile encode of everything the socket watches out.
+  // The tightest budget of the three, and a well-behaved client barely uses it:
+  // the server already pushes an unprompted full every FULL_EMIT_EVERY_N ticks.
   socket.on('vehicles:request-full', () => {
+    if (!allow(socket, limiters.full, 'vehicles:request-full')) {
+      return;
+    }
     sendVisibleFull(socket);
   });
 
@@ -476,6 +656,12 @@ io.on('connection', (socket) => {
   // so they are pulled per selection instead of riding along with every tick.
   socket.on('vehicles:details', (ids, ack) => {
     if (typeof ack !== 'function') {
+      return;
+    }
+    if (!allow(socket, limiters.details, 'vehicles:details')) {
+      // Answered, unlike the other two: the client is holding a callback and
+      // would otherwise wait out its whole ack timeout for a silent drop.
+      ack({ details: [], throttled: true });
       return;
     }
     metrics.detailRequests += 1;
@@ -492,6 +678,14 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     metrics.connectedClients -= 1;
+    const remaining = (socketsByIp.get(socket.data.clientKey) ?? 1) - 1;
+    if (remaining > 0) {
+      socketsByIp.set(socket.data.clientKey, remaining);
+    } else {
+      // Deleted rather than left at zero: the map is keyed by client address,
+      // so retaining empty entries is an unbounded leak driven by strangers.
+      socketsByIp.delete(socket.data.clientKey);
+    }
     if (socket.data.graceTimer) {
       clearTimeout(socket.data.graceTimer);
       socket.data.graceTimer = null;
@@ -588,6 +782,9 @@ const emitTimer = setInterval(() => {
 function shutdown(signal) {
   logger.info({ signal }, 'Shutting down');
   clearInterval(emitTimer);
+  for (const limiter of Object.values(limiters)) {
+    limiter.close();
+  }
   if (pollTimer) {
     clearTimeout(pollTimer);
   }
@@ -603,6 +800,21 @@ function shutdown(signal) {
   // own kill timeout.
   setTimeout(() => process.exit(0), 10000).unref();
 }
+
+// Loud and fatal, not silently degraded. Node already exits on an unhandled
+// rejection; these exist so the reason reaches the logs in the same structured
+// form as everything else first. Restarting is cheap *provided the .cache
+// volume is mounted* — route geometry and the stop index come back off disk in
+// seconds instead of the ~7 minute rebuild from the TfL API.
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'Unhandled promise rejection; exiting');
+  process.exit(1);
+});
+
+process.on('uncaughtException', (error) => {
+  logger.fatal({ err: error }, 'Uncaught exception; exiting');
+  process.exit(1);
+});
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

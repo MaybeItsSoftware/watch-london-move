@@ -40,6 +40,45 @@ const corsOrigins = [
   ...new Set([...parseCsv(process.env.CORS_ORIGIN || 'http://localhost:5173'), ...NATIVE_ORIGINS]),
 ];
 
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Collected rather than logged: config is loaded by the worker thread and by
+// the tests, neither of which should be standing up a logger. server.js prints
+// them once at boot.
+//
+// These are all cases where the default is safe for a laptop and wrong for a
+// deployment, and where the symptom is silence — a web client that never
+// connects, a route build that crawls — rather than an error anyone can trace
+// back to a missing variable.
+const warnings = [];
+// Presence is not the test. Unset is one way to end up allowing only the Vite
+// dev server; explicitly setting CORS_ORIGIN to a localhost URL — copied from
+// .env.example, which is exactly where a deployment's variables get copied
+// from — is the other, and it looks configured. Both fail the same way: the
+// deployed web app is refused while the native apps keep working, so there is
+// no obvious signal that anything is wrong.
+const browserOrigins = corsOrigins.filter((origin) => !NATIVE_ORIGINS.includes(origin));
+const isLoopback = (origin) => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin);
+if (isProduction && browserOrigins.every(isLoopback)) {
+  warnings.push(
+    browserOrigins.length === 0
+      ? 'CORS_ORIGIN allows no browser origins at all: the deployed web app will be refused by CORS. The native apps are unaffected — their origins are always allowed — so this fails silently. Set CORS_ORIGIN to the web origin.'
+      : 'CORS_ORIGIN allows only loopback origins (' +
+        browserOrigins.join(', ') +
+        '), so the deployed web app will be refused by CORS. The native apps are unaffected, so this fails silently. Set CORS_ORIGIN to the real web origin.',
+  );
+}
+if (isProduction && !tflAppKey) {
+  warnings.push(
+    'TFL_APP_KEY is unset, so TfL applies its anonymous rate limit: route geometry loads about ten times slower and polling is likelier to be throttled.',
+  );
+}
+if (isProduction && !process.env.METRICS_TOKEN) {
+  warnings.push(
+    'METRICS_TOKEN is unset, so /health reports liveness only. Set it to read bandwidth, cost and poll metrics in production.',
+  );
+}
+
 // Clamped rather than trusted: this is a per-vehicle multiplier on the payload,
 // so a stray "50" in an environment file would quietly multiply egress for every
 // connected client. A blank or unparseable value falls back to the default the
@@ -152,6 +191,48 @@ module.exports = {
   // Details are per-selection, so a request for hundreds of ids is a client
   // trying to rebuild the old firehose one round trip at a time.
   maxDetailIds: Math.max(1, Number(process.env.MAX_DETAIL_IDS || 50)),
+  // Railway's router, like Fly's, terminates TLS upstream, so the socket peer is
+  // the proxy and every client would otherwise share a single rate-limit bucket
+  // — the first busy visitor would throttle the world. A hop count rather than
+  // `true`: trusting the entire chain lets a client prepend its own
+  // X-Forwarded-For and choose which bucket it lands in.
+  trustProxy: Number(process.env.TRUST_PROXY || 1),
+  // fly.toml enforced this with hard_limit = 400; Railway has no equivalent, so
+  // the process now enforces its own ceiling. Fan-out is single-threaded, so
+  // past a few hundred sockets the TLS and write work saturates one core and
+  // every client's updates get slower — refusing the connection is kinder than
+  // degrading everyone.
+  maxConnections: Math.max(1, Number(process.env.MAX_CONNECTIONS || 400)),
+  // One visitor with several tabs is normal; one address holding dozens of
+  // sockets is not a map user.
+  maxConnectionsPerIp: Math.max(1, Number(process.env.MAX_CONNECTIONS_PER_IP || 12)),
+  // Bandwidth figures, poll internals and the allowed-origin list are operator
+  // data, not something a public endpoint should handed out. Unset, /health
+  // answers liveness only — which is all Railway's health check reads.
+  metricsToken: process.env.METRICS_TOKEN || '',
+  rateLimit: {
+    // Generous, because a normal session makes very few REST calls: the static
+    // data is bundled into the build and the live feed is a socket. Per-route
+    // costs in server.js are what actually separate /stops from /snapshot.
+    httpCapacity: Number(process.env.RATE_HTTP_CAPACITY || 60),
+    httpRefillPerSec: Number(process.env.RATE_HTTP_REFILL || 1),
+    // A full resend costs a per-tile encode of everything the socket watches —
+    // a tiny message in, megabytes out — so it gets far the tightest budget.
+    // The server already sends an unprompted full every FULL_EMIT_EVERY_N
+    // ticks, so a well-behaved client asks approximately never.
+    fullCapacity: Number(process.env.RATE_FULL_CAPACITY || 4),
+    fullRefillPerSec: Number(process.env.RATE_FULL_REFILL || 0.1),
+    // A pan legitimately fires a burst of these while the camera settles, and
+    // each newly covered tile costs a full for that tile.
+    viewportCapacity: Number(process.env.RATE_VIEWPORT_CAPACITY || 40),
+    viewportRefillPerSec: Number(process.env.RATE_VIEWPORT_REFILL || 2),
+    // Details are per-selection: a human clicking vehicles, bounded further by
+    // maxDetailIds per call.
+    detailsCapacity: Number(process.env.RATE_DETAILS_CAPACITY || 20),
+    detailsRefillPerSec: Number(process.env.RATE_DETAILS_REFILL || 2),
+  },
+  isProduction,
+  warnings,
   trainLines,
   busLines,
   allBusLines,
