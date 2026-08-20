@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { reportError } from './error-reporting';
 import maplibregl from 'maplibre-gl';
 import type { ExpressionSpecification, GeoJSONSource } from 'maplibre-gl';
 import type { FeatureCollection } from 'geojson';
@@ -304,6 +305,10 @@ function App() {
   const pointerHeldRef = useRef(false);
 
   const [mapReady, setMapReady] = useState(false);
+  // The basemap is a free, keyless public tile server with no SLA. If it goes
+  // away the vehicle layers still render and still move, so this drives a
+  // notice rather than an error state.
+  const [basemapFailed, setBasemapFailed] = useState(false);
   // Bumped every time the style is replaced, so the effects that own map state
   // — route data, filters, visibility — re-run against the new style.
   const [styleEpoch, setStyleEpoch] = useState(0);
@@ -413,9 +418,35 @@ function App() {
       center: [-0.1276, 51.5072],
       zoom: reduceMotion ? INITIAL_ZOOM : INITIAL_ZOOM - 2.2,
       pitch: reduceMotion ? 55 : 20,
+      // TfL's open data terms require the vehicle feed to be attributed. It goes
+      // in MapLibre's attribution control rather than our own chrome so it sits
+      // beside the basemap's OpenStreetMap credit — where anyone looking for
+      // provenance already knows to look — and so it survives the setStyle that
+      // every dusk, dawn and manual Day/Night toggle performs.
+      attributionControl: {
+        customAttribution:
+          'Vehicle data <a href="https://tfl.gov.uk/info-for/open-data-users/" target="_blank" rel="noopener noreferrer">Powered by TfL</a>',
+      },
     });
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+    // MapLibre reports transport failures here rather than throwing, so without
+    // a listener a dead tile server is completely silent — the map simply stays
+    // blank and the user has no idea whether it is loading or broken.
+    map.on('error', (event) => {
+      const message = event.error?.message ?? String(event.error ?? 'unknown map error');
+      // Style and sprite failures mean no basemap at all; a handful of missing
+      // tiles at the edge of a pan do not, and must not raise the notice.
+      if (/style|sprite|glyphs/i.test(message)) {
+        setBasemapFailed(true);
+      }
+      reportError(event.error ?? message, { source: 'maplibre', detail: { message } });
+    });
+
+    // Any successful style load clears it: a transient failure should not leave
+    // the notice up for the rest of the session.
+    map.on('styledata', () => setBasemapFailed(false));
 
     if (import.meta.env.DEV) {
       (window as unknown as { __map?: maplibregl.Map }).__map = map;
@@ -1171,6 +1202,11 @@ function App() {
   return (
     <div className="app-shell" data-basemap={phase}>
       <div className="map" ref={mapContainerRef} />
+      {basemapFailed ? (
+        <div className="basemap-notice panel" role="status">
+          <strong>Basemap unavailable.</strong> Vehicles are still live.
+        </div>
+      ) : null}
       <Sidebar
         open={sidebarOpen}
         onToggleOpen={toggleSidebar}

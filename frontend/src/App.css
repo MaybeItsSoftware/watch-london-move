@@ -625,3 +625,83 @@ textarea {
 .maplibregl-ctrl-bottom-right {
   padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) 0;
 }
+
+/* ── Failure states ───────────────────────────────────────────────────────────
+   Both of these sit above a map that may be blank or frozen, so they carry
+   their own backdrop rather than relying on the basemap for contrast. */
+
+.error-boundary {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+  z-index: 100;
+}
+
+.error-boundary-card {
+  max-width: 420px;
+  padding: 24px;
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.error-boundary-card h1 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  color: var(--text);
+}
+
+.error-boundary-card p {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.error-boundary-detail {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.error-boundary-card button {
+  /* 44px so it clears the minimum touch target; this is the one control on
+     screen and it is reached on a phone as often as anywhere. */
+  min-height: 44px;
+  padding: 0 20px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--panel-hover);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.error-boundary-card button:hover {
+  border-color: var(--accent);
+}
+
+/* The basemap comes from a free public tile server with no SLA. When it fails
+   the vehicle layers still render and still move — the app is degraded, not
+   broken — so this is a notice rather than a takeover. */
+.basemap-notice {
+  position: absolute;
+  top: var(--edge-top);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: center;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.basemap-notice strong {
+  color: var(--status-reconnecting);
+  font-weight: 600;
+}

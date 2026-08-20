@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest. Required for App Store submission since iOS 17; a build
+  without one is rejected at upload, which is why this exists despite the app
+  collecting nothing.
+
+  Two separate claims are being made here:
+
+  1. NSPrivacyCollectedDataTypes is empty, and it is accurate. The app has no
+     accounts, no analytics and no storage of anything about a person. The only
+     network traffic is the live vehicle feed (an anonymous WebSocket carrying
+     the map viewport), basemap tiles, and — only if VITE_ERROR_ENDPOINT is
+     configured, which it is not in the shipped builds — crash reports. If any
+     of that changes, this array is the first thing that has to change with it.
+
+  2. NSPrivacyAccessedAPITypes covers the "required reason" APIs the Capacitor
+     runtime and WKWebView reach for. These are not our calls; they come from
+     the framework, and Apple still requires the host app to declare them.
+     Re-check this list when a Capacitor plugin is added or upgraded — a new
+     plugin reaching a new category is the usual cause of a surprise rejection.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- Capacitor core persists plugin and WebView state in UserDefaults. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- WKWebView's asset cache, entirely inside the app container. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- WKWebView checks free space before writing to that cache. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- Monotonic timing inside the app; never correlated with anything. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

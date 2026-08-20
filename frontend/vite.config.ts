@@ -88,6 +88,12 @@ export default defineConfig(({ mode }) => {
     // not a normal http origin.
     base: './',
     build: {
+      // 'hidden' emits the maps but writes no sourceMappingURL comment into the
+      // bundles, so a browser never asks for them and they are not part of what
+      // ships. CI uploads them to Sentry and then deletes them before the deploy
+      // — see .github/workflows/web.yml. Without this, a Sentry stack trace from
+      // a WebView is a wall of single-letter identifiers.
+      sourcemap: 'hidden',
       rolldownOptions: {
         output: {
           // Everything used to ship as one ~2.1MB chunk, so a phone parsed the
@@ -100,9 +106,21 @@ export default defineConfig(({ mode }) => {
           // the eager graph, which is exactly what src/model-layers.ts exists to
           // keep out of it.
           manualChunks(id: string) {
-            return id.includes('node_modules') && id.includes('maplibre-gl')
-              ? 'maplibre'
-              : undefined
+            if (!id.includes('node_modules')) {
+              return undefined
+            }
+            if (id.includes('maplibre-gl')) {
+              return 'maplibre'
+            }
+            // Named only so it is identifiable in a bundle report and in the
+            // service worker's asset list; it is already split by the dynamic
+            // import in error-reporting.ts, which is what keeps it out of the
+            // cold start. With no VITE_SENTRY_DSN set at build time the DSN
+            // check constant-folds and this chunk is never emitted at all.
+            if (id.includes('@sentry')) {
+              return 'sentry'
+            }
+            return undefined
           },
         },
       },
