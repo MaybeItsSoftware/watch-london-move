@@ -1,3 +1,10 @@
+## [0.3.3](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.2...v0.3.3) (2026-08-20)
+
+
+### Performance Improvements
+
+* **backend:** stop polling for nobody, and stream the feed ([98ed7cd](https://github.com/MaybeItsSoftware/watch-london-move/commit/98ed7cd50fb0db6e21dfdbe42b9f45c6c77b1f20))
+
 ## [0.3.2](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.1...v0.3.2) (2026-08-20)
 
 
