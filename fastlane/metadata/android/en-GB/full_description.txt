@@ -1,0 +1,24 @@
+Watch London's entire public transport network move in real time.
+
+Watch London Move draws every bus, Tube train, Overground, DLR, tram and Elizabeth line service on a single map, positioned from Transport for London's live feeds — around 6,500 vehicles at a busy moment, all moving at once.
+
+Zoom out and the city becomes a swarm of colour-coded dots, each carrying the livery of the line it runs. Zoom in and vehicles become 3D models travelling along the actual roads and tracks they use, following the real route geometry rather than cutting straight lines between stops.
+
+WHAT YOU CAN DO
+
+• See every mode at once — bus, Tube, Overground, DLR, tram and the Elizabeth line
+• Filter down to the modes you care about
+• Search for a route or a line number
+• Tap any vehicle to see where it is heading and when it reaches its next stop
+• Follow a vehicle and the camera rides along with it through the streets
+• Watch the basemap follow London's daylight — bright by day, dark at night
+
+No account. No ads. Just the network, moving.
+
+ABOUT THE DATA
+
+Vehicle positions come from Transport for London's open API. TfL reports where a vehicle is heading next rather than its GPS position, so movement between stops is interpolated along the route it actually runs. The result is a faithful picture of the network rather than a metre-accurate one.
+
+Powered by TfL Open Data. Contains OS data © Crown copyright and database rights 2016 and Geomni UK Map data © and database rights 2019.
+
+Watch London Move is an independent app. It is not affiliated with, endorsed by, or sponsored by Transport for London.

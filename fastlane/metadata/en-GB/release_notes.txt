@@ -1,0 +1,6 @@
+Faster and steadier across the whole fleet.
+
+• The animation loop now paces itself to what your device can actually sustain, so busy parts of the map stay smooth and the phone stays cooler
+• Vehicle positions update without rebuilding the fleet each frame
+• The map now says so plainly when the basemap or the live feed is unavailable, instead of showing you a blank screen
+• Proper TfL attribution on the map
