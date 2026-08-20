@@ -1,3 +1,10 @@
+## [0.3.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.0...v0.3.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** strip config comments and fail on a bad Vercel deployment ([12ed8cb](https://github.com/MaybeItsSoftware/watch-london-move/commit/12ed8cb7da1dec44df21a61e96bf8040ec020ede))
+
 # [0.3.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.2.0...v0.3.0) (2026-08-20)
 
 
