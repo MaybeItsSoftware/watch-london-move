@@ -5,7 +5,7 @@ apply plugin: 'com.android.application'
 // increasing versionCode, so CI passes the workflow run number via
 // -PbuildNumber (see fastlane/Fastfile); the fallback derives from the
 // version name (M*10000 + m*100 + p), matching set-app-version.sh.
-def appVersionName = "0.2.0"
+def appVersionName = "0.3.0"
 def versionParts = appVersionName.tokenize('.')
 def appVersionCode = project.hasProperty('buildNumber')
         ? project.property('buildNumber').toInteger()
