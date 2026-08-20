@@ -182,30 +182,12 @@ jobs:
           fi
           echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
 
-          # `vercel deploy` exits 0 once the upload is accepted, before the
-          # deployment is known to be good, so this has to be checked separately.
-          #
-          # Only a *definite* failure fails the build. An earlier version treated
-          # an unreadable status as fatal and spent 40 attempts reporting
-          # "unknown" against a deployment that was in fact live — red CI on a
-          # working deploy, which is its own kind of broken. If the status cannot
-          # be read, say so loudly and let the build-id check below be the real
-          # verdict.
-          STATE=""
-          for i in $(seq 1 20); do
-            OUT="$(npx --yes vercel@latest inspect "$URL" --token="${{ secrets.VERCEL_TOKEN }}" 2>&1 || true)"
-            STATE="$(printf '%s' "$OUT" | grep -oiE '●[[:space:]]*(Ready|Error|Canceled|Queued|Building)' | sed -E 's/●[[:space:]]*//' | tail -1 || true)"
-            case "$STATE" in
-              Ready)          echo "deployment Ready"; break ;;
-              Error|Canceled) echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
-              *)              sleep 15 ;;
-            esac
-          done
-          if [ "$STATE" != "Ready" ]; then
-            echo "::warning::Could not read deployment status; last output was:"
-            printf '%s\n' "$OUT" | head -20
-          fi
-
+          # No `vercel inspect` poll here. It was tried and removed: the token
+          # authenticates for `deploy` but not for `inspect`, which answers
+          # "Error: User not found." every time, so twenty attempts bought five
+          # minutes of wall clock and no information. The build-id check below is
+          # a better verdict anyway — it establishes that the bytes just built are
+          # the bytes being served, rather than trusting a reported status.
           # The actual verdict for a production deploy: is the build we just made
           # the one being served? sw.js carries a BUILD_ID hashed from the emitted
           # asset list, so this compares bytes rather than trusting a status line.
