@@ -166,26 +166,34 @@ jobs:
       - name: Deploy
         working-directory: .
         run: |
-          set -euo pipefail
           npx --yes vercel@latest deploy --prebuilt ${{ steps.target.outputs.prod }} \
             --token="${{ secrets.VERCEL_TOKEN }}" \
             --yes | tee deploy-url.txt
-          URL="$(grep -oE 'https://[^ ]+\.vercel\.app' deploy-url.txt | tail -1)"
+
+          URL="$(grep -oE 'https://[a-z0-9.-]+\.vercel\.app' deploy-url.txt | tail -1 || true)"
+          if [ -z "$URL" ]; then
+            echo "::error::Could not find a deployment URL in the vercel output"
+            exit 1
+          fi
           echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
 
-          # `vercel deploy` exits 0 once the upload is accepted, *before* the
-          # deployment is known to be good — a deployment that errors while
-          # deploying its outputs still leaves this job green. Poll until it
-          # settles and fail on anything but READY, or a broken production
-          # deploy reports success forever.
+          # `vercel deploy` exits 0 once the upload is accepted, which is before
+          # the deployment is known to be good: a deployment that errors while
+          # deploying its outputs still leaves this step green, and the domain
+          # then serves 404 with nothing failing anywhere. Poll until it settles.
+          #
+          # `vercel inspect` prints "    status\t● Ready" — mixed case, with a
+          # bullet between the label and the value — so match the word itself
+          # rather than trying to anchor on "status".
           for i in $(seq 1 40); do
-            STATE="$(npx --yes vercel@latest inspect "$URL" --token="${{ secrets.VERCEL_TOKEN }}" 2>&1 \
-              | grep -oE 'status[[:space:]]+[A-Z]+' | awk '{print $2}' | tail -1)"
+            OUT="$(npx --yes vercel@latest inspect "$URL" --token="${{ secrets.VERCEL_TOKEN }}" 2>&1 || true)"
+            STATE="$(printf '%s' "$OUT" | grep -oiE '● *(Ready|Error|Canceled|Queued|Building)' | tail -1 | sed 's/● *//' || true)"
+            echo "attempt $i: ${STATE:-unknown}"
             case "$STATE" in
-              READY) echo "Deployment READY"; exit 0 ;;
-              ERROR|CANCELED) echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
-              *) sleep 15 ;;
+              Ready)           echo "Deployment READY"; exit 0 ;;
+              Error|Canceled)  echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
+              *)               sleep 15 ;;
             esac
           done
-          echo "::error::Vercel deployment did not settle within 10 minutes"
+          echo "::error::Vercel deployment did not reach Ready within 10 minutes"
           exit 1
