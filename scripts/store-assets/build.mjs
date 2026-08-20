@@ -26,7 +26,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FILTERS } from './lib/palette.mjs';
-import { LINES_LIGHT, streakBand, iconStreaks } from './lib/streaks.mjs';
+import { LINES, streakBand, iconStreaks } from './lib/streaks.mjs';
 import { mapPlate } from './lib/map-plate.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -166,7 +166,7 @@ function layout({ width, height, scene, index }) {
           `<text x="${pad - px(6)}" y="${headTop + i * lineStep}" font-family="${ARCHIVO}" font-weight="900" font-size="${px(132)}" letter-spacing="${px(-6)}" fill="${INK}">${esc(line)}</text>`,
       )
       .join('') +
-    streakBand({ x: 0, y: bandY, width: Math.round(width * 0.545), height: bandH, weight: px(22), colours: LINES_LIGHT }) +
+    streakBand({ x: 0, y: bandY, width: Math.round(width * 0.545), height: bandH, weight: px(22), colours: LINES }) +
     `<rect x="${pad - 1}" y="${plateTop - 1}" width="${plateW + 2}" height="${plateH + 2}" fill="none" stroke="${INK}" stroke-width="${Math.max(2, px(3))}"/>` +
     `<text x="${pad}" y="${footerY}" font-family="${ARCHIVO}" font-weight="700" font-size="${px(28)}" letter-spacing="${px(2)}" fill="${INK}">${FILTERS.map(([label]) => label.toUpperCase()).join(' · ')}</text>` +
     '</svg>';
@@ -193,7 +193,6 @@ async function plateFor(scene, box) {
         lonSpan: scene.lonSpan,
         seed: scene.seed,
         chrome: true,
-        glyph: 'streak',
         trailLength: 110,
         dots: scene.dots ?? 900,
       }),
@@ -229,7 +228,7 @@ async function featureGraphic() {
     `<text x="46" y="150" font-family="${ARCHIVO}" font-weight="900" font-size="86" letter-spacing="-4" fill="${INK}">WATCH</text>` +
     `<text x="46" y="234" font-family="${ARCHIVO}" font-weight="900" font-size="86" letter-spacing="-4" fill="${INK}">LONDON</text>` +
     `<text x="46" y="318" font-family="${ARCHIVO}" font-weight="900" font-size="86" letter-spacing="-4" fill="${ACCENT}">MOVE</text>` +
-    streakBand({ x: 0, y: 380, width: 480, height: 90, weight: 13, colours: LINES_LIGHT }) +
+    streakBand({ x: 0, y: 380, width: 480, height: 90, weight: 13, colours: LINES }) +
     '</svg>';
   const composed = await sharp(Buffer.from(svg))
     .composite([{ input: body, left: width - plateW, top: 0 }])
@@ -238,9 +237,10 @@ async function featureGraphic() {
   return opaque(composed); // Play rejects a 32-bit feature graphic.
 }
 
-/** The icon on the L/swiss ground, so listing artwork and mark agree. */
+/** The icon on the same cold white as the artwork, so the mark and the frames
+ *  around it actually agree — the ground is passed in, not defaulted. */
 const icon = (size) =>
-  sharp(Buffer.from(iconStreaks({ colours: LINES_LIGHT, ground: 'light', size })))
+  sharp(Buffer.from(iconStreaks({ background: PAPER, size })))
     .resize(size, size)
     .flatten({ background: PAPER }) // App Store rejects any alpha channel
     .png();

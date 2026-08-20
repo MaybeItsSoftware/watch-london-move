@@ -41,7 +41,5 @@
 /.vercel
 /frontend/.vercel
 
-# Aesthetic explorations, regenerable from scripts/store-assets/explorations/
-store/explorations/
 
 .DS_Store

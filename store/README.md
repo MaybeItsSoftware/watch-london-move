@@ -80,24 +80,16 @@ used.
 ## Layout
 
     scripts/store-assets/
-      build.mjs              the only entry point that ships anything
+      build.mjs              the only entry point
       lib/                   palette, streak language, map plate, font setup
-      fonts/                 vendored OFL faces
-      explorations/          the four rejected passes, kept for reference
+      fonts/                 Archivo, vendored
 
     store/
       README.md              this file
       build/                 icon masters + contact sheet
       captures/              drop real screenshots here
-      explorations/          their output (gitignored)
 
-`explorations/` holds the aesthetics that were tried and not chosen — editorial,
-arrow, flow, type. Each still runs (`node scripts/store-assets/explorations/
-type.mjs`) and writes to `store/explorations/<name>/`. Nothing in `build.mjs`
-depends on them; they are there so a future pass starts from the record rather
-than from scratch.
-
-Fonts are all SIL OFL and vendored under `scripts/store-assets/fonts/`, because
+Archivo is vendored under `scripts/store-assets/fonts/` because
 sharp resolves `font-family` through fontconfig against whatever the machine has
 installed. `fc-match` against the bundled config is how to check none is
 silently falling back to Helvetica.

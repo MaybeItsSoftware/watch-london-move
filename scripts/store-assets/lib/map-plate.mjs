@@ -98,15 +98,6 @@ function walkBack(points, i, length) {
   return out.length > 1 ? out : null;
 }
 
-/** A triangular arrowhead of `size`, centred on (x,y) and pointing at `angle`.
- *  Notched at the back so it reads as a chevron rather than a blob. */
-export function arrowHead(x, y, angle, size) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const at = (dx, dy) => `${(x + dx * cos - dy * sin).toFixed(1)},${(y + dx * sin + dy * cos).toFixed(1)}`;
-  return `M${at(size, 0)}L${at(-size * 0.78, size * 0.66)}L${at(-size * 0.34, 0)}L${at(-size * 0.78, -size * 0.66)}Z`;
-}
-
 const fmt = (points) =>
   points.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join('');
 
@@ -146,6 +137,7 @@ function streak(trail, colour, w) {
  * @param {number} [opts.lonSpan]  degrees of longitude across the plate
  * @param {boolean} [opts.chrome]  draw the app's panels over the map
  * @param {number} [opts.dots]     roughly how many vehicles to place
+ * @param {number} [opts.trailLength]  pixels of road behind each vehicle
  */
 export function mapPlate({
   width,
@@ -156,9 +148,7 @@ export function mapPlate({
   chrome = false,
   dots = 1100,
   seed = 7,
-  glyph = 'dot',
-  trails = false,
-  trailLength = 34,
+  trailLength = 110,
 }) {
   const project = projector({ width, height, centre, lonSpan });
   const margin = 40;
@@ -195,14 +185,9 @@ export function mapPlate({
         for (let i = 2; i < simplified.length; i += step) {
           if (rnd() > 0.55) continue;
           const [x, y] = simplified[i];
-          // Heading from the local tangent. TfL gives no bearing, and the app
-          // derives one the same way — from the geometry either side.
-          const [px, py] = simplified[i - 1];
-          const [nx, ny] = simplified[Math.min(i + 1, simplified.length - 1)];
           vehicles.push({
             x: x + (rnd() - 0.5) * 3,
             y: y + (rnd() - 0.5) * 3,
-            heading: Math.atan2(ny - py, nx - px),
             trail: walkBack(simplified, i, trailLength),
             colour,
             rail,
@@ -230,41 +215,10 @@ export function mapPlate({
   for (const p of railPaths) svg.push(`<path d="${p.d}" stroke="${p.colour}"/>`);
   svg.push('</g>');
 
-  // Streaks carry their own head, so they replace the marker pass entirely.
-  if (glyph === 'streak') {
-    svg.push('<g fill="none" stroke-linecap="round" stroke-linejoin="round">');
-    for (const v of shown) svg.push(streak(v.trail, v.colour, v.rail ? r * 1.5 : r * 1.05));
-    svg.push('</g>');
-  }
-
-  // Trails first, so every arrowhead sits on top of its own tail.
-  if (trails && glyph !== 'streak') {
-    svg.push(`<g fill="none" stroke-linecap="round">`);
-    for (const v of shown) {
-      if (!v.trail) continue;
-      svg.push(`<path d="${fmt(v.trail)}" stroke="${v.colour}" stroke-width="${(r * 0.9).toFixed(1)}" stroke-opacity="0.42"/>`);
-    }
-    svg.push('</g>');
-  }
-
-  // Vehicles. The halo is what makes the swarm read as lit rather than printed;
-  // deck.gl gets it from additive blending, which SVG has no equivalent for.
-  if (night && glyph === 'dot') {
-    svg.push('<g>');
-    for (const v of shown)
-      svg.push(`<circle cx="${v.x.toFixed(1)}" cy="${v.y.toFixed(1)}" r="${(r * 2.4).toFixed(1)}" fill="${v.colour}" opacity="0.16"/>`);
-    svg.push('</g>');
-  }
-  svg.push('<g>');
-  for (const v of shown) {
-    if (glyph === 'streak') {
-      continue;
-    } else if (glyph === 'arrow') {
-      svg.push(`<path d="${arrowHead(v.x, v.y, v.heading, (v.rail ? r * 2.6 : r * 2.1))}" fill="${v.colour}" stroke="${night ? '#0b0f1a' : '#ffffff'}" stroke-width="${(r * 0.3).toFixed(2)}" stroke-linejoin="round"/>`);
-    } else {
-      svg.push(`<circle cx="${v.x.toFixed(1)}" cy="${v.y.toFixed(1)}" r="${(v.rail ? r * 1.25 : r).toFixed(1)}" fill="${v.colour}" stroke="${night ? '#0b0f1a' : '#ffffff'}" stroke-width="${(r * 0.35).toFixed(2)}"/>`);
-    }
-  }
+  // Vehicles, drawn as motion rather than markers. The streak carries its own
+  // head, so there is no separate marker pass.
+  svg.push('<g fill="none" stroke-linecap="round" stroke-linejoin="round">');
+  for (const v of shown) svg.push(streak(v.trail, v.colour, v.rail ? r * 1.5 : r * 1.05));
   svg.push('</g>');
 
   if (chrome) svg.push(appChrome({ width, height }));

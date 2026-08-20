@@ -1,24 +1,21 @@
 /**
- * The streak language, shared by every suite that uses it.
+ * The streak language: the icon, and the bands that echo it in the artwork.
  *
  * A vehicle is six lines running in from the left, each a different distance
  * along. Flat weight, round caps, no taper — the version that survives a Play
  * search row. Kept in one module because the stagger and the palette have to
  * agree between the icon and the artwork around it, and two copies would drift.
  */
-import { APP, PAPER, MODE_PALETTE, forDark } from './palette.mjs';
+import { MODE_PALETTE } from './palette.mjs';
 
 /**
  * The line colours, in the order the app's own sidebar lists its six modes:
  * bus red, Underground navy, Overground orange, DLR teal, tram green,
- * Elizabeth purple.
- *
- * `LINES` is the dark-ground set, where Underground navy is lifted clear of the
- * background (see liftToFloor). `LINES_LIGHT` is the true brand hex, which only
- * works on a light ground.
+ * Elizabeth purple. True brand hex, which is legible because everything here
+ * sits on the listing's cold white — Underground navy has a luminance of 0.087
+ * and would need lifting clear of a dark ground.
  */
-export const LINES = forDark(MODE_PALETTE);
-export const LINES_LIGHT = MODE_PALETTE;
+export const LINES = MODE_PALETTE;
 
 /**
  * How far along each streak's head sits, as a fraction of the run.
@@ -27,7 +24,7 @@ export const LINES_LIGHT = MODE_PALETTE;
  * scattered heads read as six vehicles at different points of their journeys,
  * which is the thing the app actually shows.
  */
-export const STAGGER = [0.88, 0.55, 0.99, 0.47, 0.79, 0.66];
+const STAGGER = [0.88, 0.55, 0.99, 0.47, 0.79, 0.66];
 
 /** A field of flat streaks running in from the left of a box. */
 export function streakBand({
@@ -58,13 +55,14 @@ export function streakBand({
  * The icon.
  *
  * @param {object} opts
+ * @param {string} opts.background  passed in rather than defaulted, so the mark
+ *   sits on exactly the ground the artwork around it uses.
  * @param {string[]} [opts.colours]
- * @param {'dark'|'light'} [opts.ground]
  * @param {boolean} [opts.bleed] run off the left edge, or inset to the maskable
  *   safe zone an Android launcher guarantees.
  * @param {number} [opts.size]
  */
-export function iconStreaks({ colours = LINES, ground = 'dark', bleed = true, size = 512 } = {}) {
+export function iconStreaks({ background, colours = LINES, bleed = true, size = 512 }) {
   const count = 6;
   const spacing = 6.8;
   const top = 32 - (spacing * (count - 1)) / 2;
@@ -80,6 +78,6 @@ export function iconStreaks({ colours = LINES, ground = 'dark', bleed = true, si
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 64 64">` +
-    `<rect width="64" height="64" fill="${ground === 'light' ? PAPER.chalk : APP.bg}"/>${body}</svg>`
+    `<rect width="64" height="64" fill="${background}"/>${body}</svg>`
   );
 }
