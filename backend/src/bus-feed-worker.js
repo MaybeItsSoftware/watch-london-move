@@ -14,6 +14,13 @@
  * result — a few thousand canonical vehicle records — crosses back to the main
  * thread. The 80MB never exists in the process that serves clients.
  *
+ * The parse is also streamed rather than buffered (see
+ * `fetchAllBusArrivalsStreaming`), so the body is reduced row by row and neither
+ * the inflated string nor the full array is ever held. Measured on a realistic
+ * feed shape that is 259MB of peak RSS down to 204MB — which matters because
+ * peak, not steady state, is what sizes the container and what usage-based
+ * hosting bills for.
+ *
  * The stop-point index comes over separately and is kept between requests. It is
  * ~33,000 entries and changes about once a day, so shipping it with every poll
  * would put a multi-megabyte structured clone back on the main thread and undo a

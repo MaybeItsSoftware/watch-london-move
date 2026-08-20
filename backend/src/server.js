@@ -13,6 +13,7 @@ const { RouteSequences } = require('./route-sequences');
 const { VEHICLE_SCHEMA, encodeAll, toDetail } = require('./schema');
 const { ALL_ROOM, roomForTile, tileKeysForBounds } = require('./tiles');
 const { RateLimiter, httpRateLimit, socketClientKey } = require('./rate-limit');
+const { pollDelayMs, shouldRefreshOnConnect } = require('./poll-schedule');
 
 const logger = pino({ name: 'watch-london-backend' });
 
@@ -604,6 +605,12 @@ function allow(socket, limiter, event) {
 io.on('connection', (socket) => {
   metrics.connectedClients += 1;
   socketsByIp.set(socket.data.clientKey, (socketsByIp.get(socket.data.clientKey) ?? 0) + 1);
+
+  // First client after a quiet spell: bring the fleet up to date and return the
+  // poller to its active cadence.
+  if (metrics.connectedClients === 1) {
+    wakePoller();
+  }
   // Until a viewport arrives the client sees the whole network, so a client
   // that never sends one behaves exactly as it did before tiles existed.
   socket.data.tiles = null;
@@ -693,6 +700,11 @@ io.on('connection', (socket) => {
     if (socket.data.tiles === null) {
       metrics.clientsWatchingAll -= 1;
     }
+    // Last client out drops the poller back to its idle cadence rather than
+    // continuing to fetch the whole network for nobody.
+    if (metrics.connectedClients === 0) {
+      scheduleNextPoll();
+    }
     logger.info({ socketId: socket.id, connectedClients: metrics.connectedClients }, 'Client disconnected');
   });
 });
@@ -741,11 +753,71 @@ async function pollAndUpdate() {
 // must not let the next one start on top of it, or the overlap compounds into
 // more requests, more throttling, and progressively slower cycles.
 let pollTimer = null;
+let pollInFlight = false;
+
+function clearPollTimer() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+/**
+ * Arms the next poll at whichever cadence currently applies. A null delay means
+ * polling is suspended until `wakePoller` restarts it, so nothing is armed.
+ */
 function scheduleNextPoll() {
-  pollTimer = setTimeout(async () => {
+  clearPollTimer();
+  const delay = pollDelayMs({
+    connectedClients: metrics.connectedClients,
+    activeIntervalMs: config.pollIntervalMs,
+    idleIntervalMs: config.idlePollIntervalMs,
+  });
+  if (delay === null) {
+    logger.info('Polling suspended: no connected clients');
+    return;
+  }
+  pollTimer = setTimeout(runPoll, delay);
+}
+
+/**
+ * The only path that starts a cycle. The in-flight guard matters because a
+ * client connecting can trigger a poll at any moment, including part-way
+ * through the ~10s one already running — and two concurrent whole-network
+ * fetches is exactly the overlap the self-scheduling design exists to avoid.
+ */
+async function runPoll() {
+  if (pollInFlight) {
+    return;
+  }
+  pollInFlight = true;
+  try {
     await pollAndUpdate();
+  } finally {
+    pollInFlight = false;
+  }
+  scheduleNextPoll();
+}
+
+/**
+ * Called when a client arrives. Refreshes immediately if the fleet has gone
+ * stale, otherwise just re-arms at the active cadence — a socket joining a busy
+ * service must not cost an extra whole-network fetch.
+ */
+function wakePoller() {
+  const stale = shouldRefreshOnConnect({
+    lastPollAtMs: metrics.lastPollAt ? Date.parse(metrics.lastPollAt) : null,
+    nowMs: Date.now(),
+    activeIntervalMs: config.pollIntervalMs,
+  });
+  if (!stale) {
     scheduleNextPoll();
-  }, config.pollIntervalMs);
+    return;
+  }
+  clearPollTimer();
+  // Not awaited: the connection handler must not block on a 10s fetch. If one
+  // is already running, runPoll returns immediately and that cycle re-arms.
+  void runPoll();
 }
 
 const emitTimer = setInterval(() => {

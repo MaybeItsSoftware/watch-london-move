@@ -92,6 +92,18 @@ module.exports = {
   port: Number(process.env.PORT || 4010),
   corsOrigins,
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 15000),
+  // What the poller does when nobody is connected.
+  //
+  // A cycle costs a ~10s whole-network fetch, an ~80MB JSON.parse and a reduce
+  // over ~120,000 rows, and it ran unconditionally — on one deployment, 133
+  // polls against zero clients. Nothing was reading any of it. At hobby traffic
+  // that is most of the compute bill.
+  //
+  // Five minutes keeps the fleet roughly warm so a returning visitor sees a
+  // populated map immediately. Set to 0 to suspend polling entirely while idle,
+  // which is the setting to pair with a platform that sleeps idle containers —
+  // a client arriving always forces a refresh anyway (see poll-schedule.js).
+  idlePollIntervalMs: Number(process.env.IDLE_POLL_INTERVAL_MS || 300000),
   // Costs no TfL traffic — deltas carry only the vehicles that changed, and the
   // change rate is set by the poll cadence, so this splits the same changes
   // across more messages rather than sending more of them. Halves how long a

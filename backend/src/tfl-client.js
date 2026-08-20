@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 const { Worker, isMainThread } = require('worker_threads');
+// The .js extensions are load-bearing: stream-json v3 declares "./*": "./src/*"
+// in its export map, which substitutes literally and does not resolve
+// extensions, so the extensionless specifier fails at require time.
+const { chain } = require('stream-chain');
+const { parser } = require('stream-json');
+const { streamArray } = require('stream-json/streamers/stream-array.js');
 const { canonicalizeStationName } = require('./canonicalization');
 const { vehicleTypeForLine } = require('./lines');
 
@@ -467,24 +473,51 @@ class TflClient {
    * vehicle without a second pass: they sort latest-first, so the very first of
    * them already fails the test. Cost is one sort of ~8 elements per vehicle.
    */
-  static nearestStopArrivals(arrivals, nowMs, scheduleStops = 1) {
+  /**
+   * Incremental form of `nearestStopArrivals`, so the whole-network feed can be
+   * reduced as it arrives rather than after the entire array exists in memory.
+   *
+   * The batch version is now a thin wrapper over this, so both paths share one
+   * implementation and cannot drift.
+   */
+  static arrivalAccumulator(nowMs, scheduleStops = 1) {
     const byVehicle = new Map();
+    // TfL sends roughly eight predictions per vehicle and we keep at most
+    // `scheduleStops` of them, so this never truncates a real response — it
+    // exists so one malformed vehicle with thousands of rows cannot reintroduce
+    // the unbounded growth that streaming is here to remove.
+    const cap = Math.max(scheduleStops * 4, 24);
 
-    arrivals.forEach((item) => {
-      const key = item?.vehicleId || item?.id;
-      if (!key || !item?.naptanId) {
-        return;
-      }
-
-      const entry = { dueAt: TflClient.expectedArrivalMs(item, nowMs), item };
-      const rows = byVehicle.get(key);
-      if (rows) {
+    return {
+      add(item) {
+        const key = item?.vehicleId || item?.id;
+        if (!key || !item?.naptanId) {
+          return;
+        }
+        const entry = { dueAt: TflClient.expectedArrivalMs(item, nowMs), item };
+        const rows = byVehicle.get(key);
+        if (!rows) {
+          byVehicle.set(key, [entry]);
+          return;
+        }
         rows.push(entry);
-      } else {
-        byVehicle.set(key, [entry]);
-      }
-    });
+        if (rows.length > cap) {
+          rows.sort((a, b) => TflClient.compareArrivals(a, b, nowMs));
+          rows.length = cap;
+        }
+      },
+      size: () => byVehicle.size,
+      finish: () => TflClient.selectSchedules(byVehicle, nowMs, scheduleStops),
+    };
+  }
 
+  static nearestStopArrivals(arrivals, nowMs, scheduleStops = 1) {
+    const accumulator = TflClient.arrivalAccumulator(nowMs, scheduleStops);
+    arrivals.forEach((item) => accumulator.add(item));
+    return accumulator.finish();
+  }
+
+  static selectSchedules(byVehicle, nowMs, scheduleStops) {
     const results = [];
     for (const rows of byVehicle.values()) {
       rows.sort((a, b) => TflClient.compareArrivals(a, b, nowMs));
@@ -723,21 +756,64 @@ class TflClient {
     }
   }
 
+  /**
+   * The whole-network feed as a stream, reduced row by row.
+   *
+   * The buffered path holds three large things at once: the ~8MB gzipped body,
+   * the ~90MB string it inflates to, and the ~120,000-object array that string
+   * parses into. Only the last is useful, and only a few thousand records
+   * survive the reduce — so peak memory, not steady state, is what sized this
+   * service at 4GB, and on a platform billing actual usage that peak is paid for
+   * every cycle.
+   *
+   * Streaming keeps one row in flight at a time. The accumulator holds bounded
+   * per-vehicle state and everything else is collectable as it passes.
+   *
+   * Falls back to the buffered path on any streaming failure: this runs on the
+   * worker thread where a throw costs the whole poll, and a slightly heavy poll
+   * beats no data at all.
+   */
+  async fetchAllBusArrivalsStreaming(fetchedAtMs) {
+    const response = await this.http.get('/Mode/bus/Arrivals?count=-1', {
+      responseType: 'stream',
+      timeout: this.config.busFeedTimeoutMs,
+    });
+
+    const accumulator = TflClient.arrivalAccumulator(fetchedAtMs, this.config.scheduleStops);
+    const pipeline = chain([response.data, parser(), streamArray()]);
+
+    await new Promise((resolve, reject) => {
+      pipeline.on('data', ({ value }) => accumulator.add(value));
+      pipeline.on('end', resolve);
+      pipeline.on('error', reject);
+      response.data.on('error', reject);
+    });
+
+    return accumulator.finish();
+  }
+
   /** The whole-network feed, read on whichever thread calls this. Invoked
    *  directly by bus-feed-worker.js, and by the dispatcher above as a fallback. */
   async fetchAllBusArrivalsInProcess(stopPoints, fetchedAtMs) {
-    const arrivals = await this.getJsonWithRetry(
-      '/Mode/bus/Arrivals?count=-1',
-      this.config.retryCount,
-      this.config.retryBaseDelayMs,
-      { timeout: this.config.busFeedTimeoutMs },
-    );
+    let reduced;
+    try {
+      reduced = await this.fetchAllBusArrivalsStreaming(fetchedAtMs);
+    } catch (error) {
+      this.streamingFailures = (this.streamingFailures || 0) + 1;
+      const arrivals = await this.getJsonWithRetry(
+        '/Mode/bus/Arrivals?count=-1',
+        this.config.retryCount,
+        this.config.retryBaseDelayMs,
+        { timeout: this.config.busFeedTimeoutMs },
+      );
+      reduced = TflClient.nearestStopArrivals(
+        Array.isArray(arrivals) ? arrivals : [],
+        fetchedAtMs,
+        this.config.scheduleStops,
+      );
+    }
 
-    return TflClient.nearestStopArrivals(
-      Array.isArray(arrivals) ? arrivals : [],
-      fetchedAtMs,
-      this.config.scheduleStops,
-    )
+    return reduced
       .map(({ item, schedule }) =>
         TflClient.busVehicle(item, item.lineId, stopPoints, 'tfl-mode-arrivals', fetchedAtMs, schedule),
       )

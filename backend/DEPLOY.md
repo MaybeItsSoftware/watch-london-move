@@ -72,6 +72,30 @@ inside the Railway project. The frontend needs the public domain — Settings �
 Networking → Public Networking — because it runs in a browser or a phone, not in
 the project.
 
+## What keeps the bill down
+
+Egress is the headline cost *at scale*, but on a hobby deployment the dominant
+cost is compute, because this process cannot scale to zero the way a request-
+driven service can. Four things address that, in descending order of effect:
+
+1. **Idle poll backoff** (`IDLE_POLL_INTERVAL_MS`). A cycle is a ~10s
+   whole-network fetch, an ~80MB parse and a reduce over ~120,000 rows, and it
+   used to run every 15s regardless of whether anyone was watching — measured on
+   a live deployment at 133 polls against zero connected clients. It now backs
+   off when the last client leaves and refreshes the moment one arrives. Set to 0
+   to suspend polling entirely while idle.
+2. **Sleeping** (`sleepApplication` in `railway.toml`). Only viable *because* of
+   the backoff: with nothing on a timer, an unused container can be stopped
+   outright. Costs the first visitor after a quiet spell roughly twenty seconds
+   of empty map.
+3. **Streamed feed parsing.** The whole-network body is reduced row by row
+   instead of being buffered, inflated and parsed whole — 259MB to 204MB of peak
+   RSS on a realistic feed. Peak is what sizes the container and what
+   usage-based hosting charges for.
+4. **A volume on `/app/.cache`.** Not a running cost but a per-deploy one:
+   without it every deploy rebuilds route geometry from the TfL API, which is
+   ~7 minutes and several thousand requests, every time.
+
 ## What keeps egress down
 
 Four things, all on by default. Each can be turned off to measure its effect.

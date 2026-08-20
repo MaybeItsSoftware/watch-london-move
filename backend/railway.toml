@@ -52,6 +52,16 @@ restartPolicyMaxRetries = 10
 # the B1 entry in ../PERFORMANCE.md.
 numReplicas = 1
 
-# This is a stateful poller holding live WebSockets. Sleeping drops every
-# connection and restarts the polling cycle from cold.
-sleepApplication = false
+# Sleeping used to be impossible here: the poller ran unconditionally, so the
+# process was never idle and stopping it meant stopping the data.
+#
+# It now backs off when nobody is connected (see poll-schedule.js), and with
+# IDLE_POLL_INTERVAL_MS=0 it suspends entirely — so an unused container really is
+# doing nothing, and paying for it is pure waste. A poll runs at boot and again
+# the moment a client arrives, so the fleet is never served stale.
+#
+# The trade is the first visitor after a quiet spell: container start, route
+# geometry read back off the volume, then a ~10s whole-network poll before any
+# vehicle appears. Roughly twenty seconds of empty map. Set this back to false if
+# that matters more than the compute bill.
+sleepApplication = true
