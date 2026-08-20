@@ -1,3 +1,15 @@
+# [0.4.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.4...v0.4.0) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** drop the Vercel inspect poll that never worked ([0e9226d](https://github.com/MaybeItsSoftware/watch-london-move/commit/0e9226dfa509da17c52a8b26a27f7b37a2ba81d6))
+
+
+### Features
+
+* **icons:** replace the roundel with the streak mark ([5b83b63](https://github.com/MaybeItsSoftware/watch-london-move/commit/5b83b63b6d311c8fa76c86aad8df19479ec6710c)), closes [#0b0f1a](https://github.com/MaybeItsSoftware/watch-london-move/issues/0b0f1a) [#000f9f](https://github.com/MaybeItsSoftware/watch-london-move/issues/000f9f) [#0b0f1a](https://github.com/MaybeItsSoftware/watch-london-move/issues/0b0f1a)
+
 ## [0.3.4](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.3...v0.3.4) (2026-08-20)
 
 
