@@ -26,8 +26,19 @@ TEAM_ID  = ENV["TEAM_ID"] || "6NQNU5YSC2"
 BUILD_NUMBER = ENV.fetch("BUILD_NUMBER") { raise "BUILD_NUMBER env var is required. Set it to a value higher than the last store submission." }
 
 # Vite build + copy into the given native platform ("ios" / "android").
+#
+# The .map delete is load-bearing. vite.config.ts builds with sourcemap:'hidden'
+# so Sentry can symbolicate minified stack traces, and web.yml uploads the maps
+# and then strips them before publishing to Vercel. `cap sync` copies dist/
+# wholesale into the native project, so without the same strip here every store
+# build would ship the maps inside the app — inflating the download and handing
+# the original TypeScript to anyone who unzips the IPA or AAB.
+#
+# The maps are not lost: web.yml uploads them to Sentry under the same release
+# tag, and the bundle is byte-identical across all three targets, so native
+# crashes symbolicate against that one upload.
 def sync_web(platform)
-  sh("cd #{FRONTEND} && npm ci && npm run build && npx cap sync #{platform}")
+  sh("cd #{FRONTEND} && npm ci && npm run build && find dist -name '*.map' -delete && npx cap sync #{platform}")
 end
 
 platform :ios do

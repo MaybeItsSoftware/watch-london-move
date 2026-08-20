@@ -35,3 +35,13 @@
 /fastlane/report.xml
 /frontend/android/key.properties
 /frontend/android/app/upload-keystore.jks
+
+# Vercel CLI state. Created by `vercel link` locally, and by web.yml in CI when
+# it assembles the Build Output — neither belongs in the repo.
+/.vercel
+/frontend/.vercel
+
+# Store artwork samples (not release assets)
+store/samples/
+store/samples-arrow/
+store/samples-flow/

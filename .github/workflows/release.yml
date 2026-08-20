@@ -21,8 +21,8 @@ jobs:
             backend/package-lock.json
             frontend/package-lock.json
 
-      - name: Backend smoke test
-        run: npm ci && npm run smoke
+      - name: Backend tests
+        run: npm ci && npm test
         working-directory: backend
 
       - name: Frontend lint + build

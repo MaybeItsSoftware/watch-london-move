@@ -33,6 +33,7 @@ jobs:
     outputs:
       released: ${{ steps.check.outputs.released }}
       sha: ${{ steps.check.outputs.sha }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,9 +43,11 @@ jobs:
         id: check
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          VERSION="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+          echo "version=${VERSION:-untagged}" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "released=true" >> "$GITHUB_OUTPUT"
-          elif git describe --tags --exact-match HEAD 2>/dev/null | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          elif printf '%s' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "released=true" >> "$GITHUB_OUTPUT"
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
@@ -69,8 +72,8 @@ jobs:
             backend/package-lock.json
             frontend/package-lock.json
 
-      - name: Backend smoke test
-        run: npm ci && npm run smoke
+      - name: Backend tests
+        run: npm ci && npm test
         working-directory: backend
 
       - name: Frontend lint + build
@@ -112,6 +115,12 @@ jobs:
       - name: Build & upload to TestFlight
         run: bundle exec fastlane ios beta
         env:
+          # Same DSN and release as the web deploy. The bundle is byte-identical
+          # across all three targets — the platform is derived at runtime rather
+          # than inlined — so web.yml's single source-map upload symbolicates
+          # these too. See src/error-reporting.ts.
+          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_RELEASE: ${{ needs.check-release.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
@@ -164,5 +173,11 @@ jobs:
       - name: Build & upload to Play (internal)
         run: bundle exec fastlane android beta
         env:
+          # Same DSN and release as the web deploy. The bundle is byte-identical
+          # across all three targets — the platform is derived at runtime rather
+          # than inlined — so web.yml's single source-map upload symbolicates
+          # these too. See src/error-reporting.ts.
+          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_RELEASE: ${{ needs.check-release.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}

@@ -1,0 +1,159 @@
+name: Web
+
+# Production deploys ride the same gate as the store builds — see deploy.yml for
+# why that is a workflow_run on Release rather than a tag push. Web and native
+# run the identical bundle against one backend and one wire format, so shipping
+# the web ahead of the apps would put clients of different vintages on the same
+# socket protocol. Pull requests get a preview deployment instead.
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: web-${{ github.event.workflow_run.id || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ─── Gate: production only for a Release run that actually cut a tag ───
+  check-release:
+    name: Check a release happened
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.check.outputs.released }}
+      sha: ${{ steps.check.outputs.sha }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full tag history, to see what is tagged at HEAD
+
+      - name: Was the commit Release just left on master tagged?
+        id: check
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          VERSION="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+          echo "version=${VERSION:-untagged}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    name: Build & deploy to Vercel
+    needs: [check-release]
+    # check-release is skipped entirely on a pull request, which would normally
+    # skip this job with it. always() lets it run anyway, so the condition below
+    # has to restate the gate rather than rely on `needs` succeeding.
+    if: |
+      always() && (
+        github.event_name == 'pull_request' ||
+        needs.check-release.outputs.released == 'true'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty on a pull request, where check-release never ran.
+          ref: ${{ needs.check-release.outputs.sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve the deploy target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "prod=" >> "$GITHUB_OUTPUT"
+            echo "environment=preview" >> "$GITHUB_OUTPUT"
+            echo "release=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "prod=--prod" >> "$GITHUB_OUTPUT"
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "release=${{ needs.check-release.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - run: npm ci
+
+      - name: Build
+        # VITE_BACKEND_URL and VITE_SOCKET_URL come from the committed
+        # .env.production; only the Sentry values are injected here, because the
+        # release name is not knowable until the tag exists. With no DSN secret
+        # configured the SDK constant-folds out of the bundle entirely — see the
+        # manualChunks comment in vite.config.ts.
+        run: npm run build
+        env:
+          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_RELEASE: ${{ steps.target.outputs.release }}
+          VITE_SENTRY_ENVIRONMENT: ${{ steps.target.outputs.environment }}
+
+      - name: Upload source maps to Sentry
+        # Same guard open-parliament uses for its dSYMs: the pipeline works
+        # without Sentry configured, it just produces minified stack traces.
+        if: env.SENTRY_AUTH_TOKEN != ''
+        # Symbolication is a diagnostic aid, not a deploy requirement. A wrong
+        # SENTRY_PROJECT slug or an expired token should not stop a released
+        # build from reaching users — the app is identical either way, its stack
+        # traces are just minified. The step still shows as failed in the run
+        # summary, so it cannot rot unnoticed.
+        continue-on-error: true
+        run: |
+          curl -sL https://sentry.io/get-cli/ | bash
+          RELEASE="${{ steps.target.outputs.release }}"
+          sentry-cli releases new "$RELEASE"
+          # `~` matches any host, which is what lets one upload serve both the
+          # web origin and the Capacitor WebViews, whose scripts load from
+          # capacitor://localhost and https://localhost.
+          sentry-cli releases files "$RELEASE" upload-sourcemaps dist/assets \
+            --url-prefix '~/assets' \
+            --rewrite
+          sentry-cli releases finalize "$RELEASE"
+
+      - name: Strip source maps from the deployable output
+        # `sourcemap: 'hidden'` already keeps any sourceMappingURL comment out of
+        # the bundles, so nothing requests these — but shipping them would still
+        # publish readable source to anyone who guesses the filename.
+        run: |
+          find dist -name '*.map' -delete
+          echo "remaining .map files: $(find dist -name '*.map' | wc -l | tr -d ' ')"
+
+      - name: Assemble the Vercel Build Output
+        run: |
+          mkdir -p ../.vercel/output/static
+          cp -R dist/. ../.vercel/output/static/
+          cp vercel-output-config.json ../.vercel/output/config.json
+
+      - name: Deploy
+        working-directory: .
+        run: |
+          npx --yes vercel@latest deploy --prebuilt ${{ steps.target.outputs.prod }} \
+            --token="${{ secrets.VERCEL_TOKEN }}" \
+            --yes | tee deploy-url.txt
+          echo "Deployed: $(tail -1 deploy-url.txt)" >> "$GITHUB_STEP_SUMMARY"

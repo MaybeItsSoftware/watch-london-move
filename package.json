@@ -8,8 +8,9 @@
     "lint": "npm run lint --prefix frontend",
     "typecheck": "npm run typecheck --prefix frontend",
     "smoke": "npm run smoke --prefix backend",
-    "ci": "npm run smoke && npm run lint && npm run build",
-    "prepare": "husky"
+    "ci": "npm test && npm run lint && npm run build",
+    "prepare": "husky",
+    "test": "npm test --prefix backend"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.1.0",

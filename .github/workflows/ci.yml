@@ -1,12 +1,22 @@
 name: CI
 
+# Runs on pull requests only. A direct push to master is already gated by the
+# Release workflow's own "Pre-release checks" job, so triggering here as well
+# would run the identical suite twice on every merge and halve nothing.
 on:
-  push:
-    branches: [master]
   pull_request:
+    branches: [master]
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
 
 jobs:
   backend:
+    name: Backend tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -15,13 +25,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
-      - run: npm run smoke
+      - run: npm test
 
   frontend:
+    name: Frontend lint & build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,9 +41,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
+      # `npm run build` is `tsc -b && vite build`, so this typechecks too.
       - run: npm run build

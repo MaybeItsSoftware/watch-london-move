@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # set-github-secrets.sh — push the CI/CD secrets from your local .env into the
-# repo's GitHub Actions secrets, so .github/workflows/deploy.yml can run.
+# repo's GitHub Actions secrets, so .github/workflows/deploy.yml (stores) and
+# web.yml (Vercel + Sentry) can run.
 #
 # Usage:   ./scripts/set-github-secrets.sh
 #
@@ -38,6 +39,13 @@ KEYSTORE_PASSWORD
 KEY_ALIAS
 KEY_PASSWORD
 PLAY_STORE_SERVICE_ACCOUNT_JSON
+VERCEL_TOKEN
+VERCEL_ORG_ID
+VERCEL_PROJECT_ID
+SENTRY_DSN
+SENTRY_AUTH_TOKEN
+SENTRY_ORG
+SENTRY_PROJECT
 "
 
 # Pull a single value for KEY from .env, splitting only on the first '='

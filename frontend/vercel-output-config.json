@@ -1,0 +1,39 @@
+{
+  "//": [
+    "Vercel Build Output API config, copied to .vercel/output/config.json by",
+    ".github/workflows/web.yml. It lives here rather than being written inline",
+    "in the workflow so the caching and routing rules are reviewable in a diff.",
+    "",
+    "Not a vercel.json: the workflow builds with `npm run build` rather than",
+    "`vercel build`, because the build needs VITE_SENTRY_RELEASE from the git",
+    "tag and the source maps have to be uploaded and then deleted before the",
+    "output is deployed. This is the deterministic version of that."
+  ],
+  "version": 3,
+  "routes": [
+    {
+      "//": "Content-hashed by Vite, so the name changes whenever the bytes do.",
+      "src": "/assets/(.*)",
+      "headers": { "cache-control": "public, max-age=31536000, immutable" },
+      "continue": true
+    },
+    {
+      "//": "Never cache the worker script or the shell. A stale sw.js pins a broken deploy in place for as long as it is cached, which is exactly when it hurts most.",
+      "src": "/(sw\\.js|index\\.html|manifest\\.webmanifest)",
+      "headers": { "cache-control": "public, max-age=0, must-revalidate" },
+      "continue": true
+    },
+    {
+      "//": "Route geometry and the stop index: ~5MB, not content-hashed, and changed by TfL a few times a year. Same policy the backend serves /routes under, so the two agree.",
+      "src": "/data/(.*)",
+      "headers": { "cache-control": "public, max-age=3600, stale-while-revalidate=86400" },
+      "continue": true
+    },
+    { "handle": "filesystem" },
+    {
+      "//": "Single page app: anything not on disk is the shell.",
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}
