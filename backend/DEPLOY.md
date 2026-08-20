@@ -25,8 +25,8 @@ time of writing, per GB:
 | Host | Egress | Notes |
 |---|---|---|
 | Hetzner / OVH VPS | ~€1/TB after 20 TB included | Cheapest by a wide margin. |
-| Fly.io | $0.02/GB | Reasonable managed option; `fly.toml` in this directory. |
-| Railway | $0.05/GB | |
+| Fly.io | $0.02/GB | `fly.toml` is still in this directory but is no longer the deployment target. |
+| **Railway** | **$0.05/GB** | **The current deployment.** See "Deploying to Railway" below. |
 | Render | $0.10/GB after 100 GB | |
 | AWS / GCP | $0.09/GB | 40–70x Hetzner on a pure-egress workload. Avoid. |
 
@@ -38,6 +38,39 @@ this before committing to a host rather than trusting an estimate.
 That figure only covers the socket feed. The other half of the bill is the cold
 start: a client that has never loaded the app pulls the route geometry once,
 which is larger than an hour of live updates.
+
+## Deploying to Railway
+
+Railway builds from this directory's `Dockerfile` on every push to `master`.
+`railway.toml` holds what can be expressed as code — health check, restart
+policy, replica count, sleep. Three things cannot be, and are dashboard-only:
+
+1. **Root Directory = `backend`.** There is no Dockerfile at the repo root, and
+   the root `package.json` is frontend orchestration with a husky prepare step.
+   Left unset, Railway detects that and builds the wrong thing.
+2. **A volume mounted at `/app/.cache`.** Railway *rejects* a Dockerfile
+   `VOLUME` instruction — the build fails with "docker VOLUME ... is not
+   supported, use Railway Volumes" — so the Dockerfile has none and the mount is
+   declared in the dashboard. Without one, *every push* redeploys into a cold container
+   and spends ~7 minutes rebuilding route geometry and refetching a 33-page stop
+   index from the TfL API — slower still without a `TFL_APP_KEY`. This is the
+   single most expensive thing to get wrong, and it is silent: the service comes
+   up, serves `503 {"status":"loading"}` from `/routes` for several minutes,
+   and nothing says why.
+3. **Service variables** — see the checklist below.
+
+Two things Fly gave us for free that Railway does not, both now handled in the
+process itself (`config.js`, `rate-limit.js`):
+
+- `fly.toml`'s `hard_limit = 400` was the only ceiling on concurrent sockets.
+  `MAX_CONNECTIONS` and `MAX_CONNECTIONS_PER_IP` replace it.
+- Fly's private networking meant `/health` was less exposed. On Railway the
+  public domain answers everything, so the metrics moved behind `METRICS_TOKEN`.
+
+**`*.railway.internal` is the private network hostname** and resolves only
+inside the Railway project. The frontend needs the public domain — Settings →
+Networking → Public Networking — because it runs in a browser or a phone, not in
+the project.
 
 ## What keeps egress down
 
@@ -115,19 +148,59 @@ Set `HTTP_COMPRESSION=false` to measure the difference, or
 ## Scaling out
 
 Fan-out is single-threaded. Past a few hundred concurrent sockets, TLS and write
-syscalls saturate one core. Run multiple instances behind a load balancer — each
-polls TfL independently, so also raise `POLL_INTERVAL_MS` or put a shared cache
-in front of the API to avoid multiplying upstream requests by instance count.
+syscalls saturate one core — which is what `MAX_CONNECTIONS` refuses past.
+
+**Do not simply raise the replica count.** Railway makes that a toggle, and it is
+the wrong move: this process is both the poller and the gateway, so every replica
+runs its own TfL polling loop and holds its own in-memory fleet. Clients would
+see different vehicles depending on which replica they landed on, and the TfL
+request rate would multiply by the replica count.
+
+The shape that scales is one poller publishing canonical state, N stateless
+socket gateways, and the socket.io Redis adapter between them. That is the B1
+entry in `../PERFORMANCE.md`, and it is worth doing *before* the app is in two
+stores rather than after.
 
 ## Before going live
 
-- Register a TfL app key (`TFL_APP_KEY`). Keyless is rate-limited to ~50 req/min
-  and the route-sequence build paces itself 10x slower to compensate.
-- Set `CORS_ORIGIN` to the real frontend origin. It defaults to localhost.
-  `fly.toml` sets it to the native app origins; append the web origin there.
-- Serve over TLS. iOS App Transport Security blocks plain HTTP and WS, so a
-  mobile client cannot reach an unencrypted backend.
-- Check TfL's API terms for attribution requirements.
+The server logs a warning at boot for each of the first three when
+`NODE_ENV=production`, so check the deploy logs rather than trusting this list.
+
+- **`TFL_APP_KEY`** — keyless is rate-limited to ~50 req/min and the
+  route-sequence build paces itself 10x slower to compensate.
+- **`CORS_ORIGIN`** — the web frontend origin:
+
+  ```
+  CORS_ORIGIN=https://watchlondonmove.maybeitssoftware.co.uk
+  ```
+
+  It defaults to the Vite dev server, so leaving it unset means the deployed web
+  app is refused by CORS while the native apps carry on working — a confusing way
+  to find out. Setting it to a *localhost* value warns too: the boot check tests
+  whether any non-loopback browser origin is allowed, not merely whether the
+  variable is present, because copying the value out of `.env.example` is exactly
+  how a deployment ends up looking configured and being wrong.
+- **`METRICS_TOKEN`** — without it `/health` reports liveness only in
+  production. Read the full body with `Authorization: Bearer <token>`.
+- **A volume on `/app/.cache`** — see above.
+- **TLS.** iOS App Transport Security blocks plain HTTP and WS, so a mobile
+  client cannot reach an unencrypted backend. Railway's public domain is HTTPS.
+- **Attribution.** TfL's open data terms require it; the frontend carries
+  "Powered by TfL" in the map's attribution control alongside the OpenStreetMap
+  credit. If the UI changes, that has to survive.
+
+### Rate limits
+
+Every expensive path has a token-bucket budget, because egress is the entire
+bill and all of these are cheap to ask for. Defaults and rationale are in
+`.env.example`; the enforcement is `rate-limit.js`, shared between the HTTP
+routes and the socket handlers so a client cannot dodge one budget by using the
+other. `/health` reports `limits.throttledMessages` and
+`limits.refusedConnections` to an authorised caller.
+
+The one worth understanding is `vehicles:request-full`: a socket message of a
+few bytes that costs a per-tile encode of everything the client is watching. It
+gets the tightest budget of anything here (4 burst, then one per 10s).
 
 ## Native clients
 

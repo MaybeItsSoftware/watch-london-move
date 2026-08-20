@@ -1,0 +1,57 @@
+# Railway service configuration for the backend.
+#
+# Set the service's **Root Directory to `backend`** in the dashboard, or Railway
+# resolves the repo root — where there is no Dockerfile and the package.json is
+# frontend orchestration with a husky prepare step — and builds the wrong thing.
+#
+# Two things cannot be expressed here and must be set in the dashboard:
+#
+#   1. A **volume mounted at `/app/.cache`**. Railway has no Dockerfile-side
+#      equivalent — it *rejects* a `VOLUME` instruction outright ("docker VOLUME
+#      at Line 15 is not supported, use Railway Volumes") and fails the build, so
+#      the Dockerfile deliberately has none. Without a volume attached here, every
+#      push to master redeploys and spends ~7 minutes rebuilding route geometry
+#      and refetching a 33-page stop index from the TfL API — on every commit, and
+#      slower still without TFL_APP_KEY.
+#   2. The service **variables**:
+#
+#        CORS_ORIGIN=https://watchlondonmove.maybeitssoftware.co.uk
+#        TFL_APP_KEY=<key>
+#        METRICS_TOKEN=<generated secret>
+#
+#      The server logs a warning at boot for each one that is missing — or, for
+#      CORS_ORIGIN, present but useless — in production; see config.js.
+#
+# See DEPLOY.md for sizing, the egress cost model, and why this cannot be
+# serverless.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "node src/server.js"
+
+# Liveness only, and cheap — the metrics that used to live on this endpoint are
+# behind METRICS_TOKEN now. The timeout is generous because the first poll runs
+# before the server listens, and a cold start with no cache volume spends
+# minutes building route geometry.
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+
+# In-memory fleet state, so a crash means the poller starts over. Restart, but
+# stop retrying if it is crash-looping rather than hammering TfL forever.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# One, and it must stay one. Each replica runs its own TfL poller and holds its
+# own in-memory fleet, so clients would see different vehicles depending on
+# which replica they landed on — and the TfL request rate would multiply by the
+# replica count. Scaling out means one poller publishing canonical state, N
+# stateless socket gateways, and the socket.io Redis adapter between them; see
+# the B1 entry in ../PERFORMANCE.md.
+numReplicas = 1
+
+# This is a stateful poller holding live WebSockets. Sleeping drops every
+# connection and restarts the polling cycle from cold.
+sleepApplication = false

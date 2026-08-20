@@ -9,10 +9,16 @@ RUN npm ci --omit=dev
 
 COPY src ./src
 
-# The route-sequence and stop-point caches live here. Mount a volume on it, or
-# every restart spends ~7 minutes rebuilding route geometry from the TfL API.
+# The route-sequence and stop-point caches live here. Attach a persistent volume
+# at this path, or every restart spends ~7 minutes rebuilding route geometry from
+# the TfL API.
+#
+# Deliberately no `VOLUME` instruction: Railway rejects the whole Dockerfile with
+# "docker VOLUME at Line 15 is not supported, use Railway Volumes" rather than
+# ignoring it, so the build never even starts. The mount is declared in the
+# Railway dashboard instead (see railway.toml). Running this image under plain
+# Docker, pass `-v wlm-cache:/app/.cache` yourself.
 RUN mkdir -p /app/.cache
-VOLUME ["/app/.cache"]
 
 ENV NODE_ENV=production
 ENV PORT=4010
