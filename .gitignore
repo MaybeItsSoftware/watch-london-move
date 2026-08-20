@@ -43,3 +43,6 @@
 
 
 .DS_Store
+
+# Derived: a by-device symlink view of fastlane/screenshots/en-GB, for browsing.
+/store/preview/
