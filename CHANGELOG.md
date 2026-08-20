@@ -1,3 +1,10 @@
+## [0.3.2](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.1...v0.3.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** correct the Vercel deployment state check ([a2172b1](https://github.com/MaybeItsSoftware/watch-london-move/commit/a2172b13926e273019918b1efea9951662056c07))
+
 ## [0.3.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.0...v0.3.1) (2026-08-20)
 
 
