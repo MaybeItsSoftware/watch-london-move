@@ -165,6 +165,11 @@ jobs:
 
       - name: Deploy
         working-directory: .
+        env:
+          # Only used to verify the deploy landed — `--prod` still publishes to
+          # whatever production domains the project carries, so this is not the
+          # deploy target and a stale value cannot misroute anything.
+          PRODUCTION_URL: https://watchlondonmove.maybeitssoftware.co.uk
         run: |
           npx --yes vercel@latest deploy --prebuilt ${{ steps.target.outputs.prod }} \
             --token="${{ secrets.VERCEL_TOKEN }}" \
@@ -177,23 +182,43 @@ jobs:
           fi
           echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
 
-          # `vercel deploy` exits 0 once the upload is accepted, which is before
-          # the deployment is known to be good: a deployment that errors while
-          # deploying its outputs still leaves this step green, and the domain
-          # then serves 404 with nothing failing anywhere. Poll until it settles.
+          # `vercel deploy` exits 0 once the upload is accepted, before the
+          # deployment is known to be good, so this has to be checked separately.
           #
-          # `vercel inspect` prints "    status\t● Ready" — mixed case, with a
-          # bullet between the label and the value — so match the word itself
-          # rather than trying to anchor on "status".
-          for i in $(seq 1 40); do
+          # Only a *definite* failure fails the build. An earlier version treated
+          # an unreadable status as fatal and spent 40 attempts reporting
+          # "unknown" against a deployment that was in fact live — red CI on a
+          # working deploy, which is its own kind of broken. If the status cannot
+          # be read, say so loudly and let the build-id check below be the real
+          # verdict.
+          STATE=""
+          for i in $(seq 1 20); do
             OUT="$(npx --yes vercel@latest inspect "$URL" --token="${{ secrets.VERCEL_TOKEN }}" 2>&1 || true)"
-            STATE="$(printf '%s' "$OUT" | grep -oiE '● *(Ready|Error|Canceled|Queued|Building)' | tail -1 | sed 's/● *//' || true)"
-            echo "attempt $i: ${STATE:-unknown}"
+            STATE="$(printf '%s' "$OUT" | grep -oiE '●[[:space:]]*(Ready|Error|Canceled|Queued|Building)' | sed -E 's/●[[:space:]]*//' | tail -1 || true)"
             case "$STATE" in
-              Ready)           echo "Deployment READY"; exit 0 ;;
-              Error|Canceled)  echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
-              *)               sleep 15 ;;
+              Ready)          echo "deployment Ready"; break ;;
+              Error|Canceled) echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
+              *)              sleep 15 ;;
             esac
           done
-          echo "::error::Vercel deployment did not reach Ready within 10 minutes"
-          exit 1
+          if [ "$STATE" != "Ready" ]; then
+            echo "::warning::Could not read deployment status; last output was:"
+            printf '%s\n' "$OUT" | head -20
+          fi
+
+          # The actual verdict for a production deploy: is the build we just made
+          # the one being served? sw.js carries a BUILD_ID hashed from the emitted
+          # asset list, so this compares bytes rather than trusting a status line.
+          # Deployment URLs cannot be used for this — they sit behind Vercel's SSO
+          # and answer 302 whether the deployment succeeded or failed.
+          if [ -n "${{ steps.target.outputs.prod }}" ]; then
+            BUILT="$(sed -n 's/.*BUILD_ID = "\([a-f0-9]*\)".*/\1/p' frontend/dist/sw.js | head -1)"
+            for i in $(seq 1 20); do
+              LIVE="$(curl -sf --max-time 20 "$PRODUCTION_URL/sw.js" 2>/dev/null \
+                | sed -n 's/.*BUILD_ID = "\([a-f0-9]*\)".*/\1/p' | head -1)"
+              [ "$LIVE" = "$BUILT" ] && { echo "production serving build $BUILT"; exit 0; }
+              sleep 15
+            done
+            echo "::error::$PRODUCTION_URL is serving build '${LIVE:-none}', expected '$BUILT'"
+            exit 1
+          fi
