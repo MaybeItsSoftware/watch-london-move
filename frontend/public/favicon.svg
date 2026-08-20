@@ -1,6 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Abstract dark roundel: dark disc with a soft ring and a horizontal bar. -->
-  <circle cx="32" cy="32" r="30" fill="#0b0f1a" />
-  <circle cx="32" cy="32" r="24" fill="none" stroke="#38bdf8" stroke-width="5" />
-  <rect x="6" y="27.5" width="52" height="9" rx="4.5" fill="#e6eaf2" />
+  <!-- Six streaks running in from the left, each a different distance along:
+       six vehicles at different points of their journeys. Colours and stagger
+       are the app's own six modes, shared with the store artwork via
+       scripts/store-assets/lib/streaks.mjs — change them there. -->
+  <rect width="64" height="64" fill="#f1f1ef" />
+  <path d="M-4 15H52.32" fill="none" stroke="#DC241F" stroke-width="4.6" stroke-linecap="round" />
+  <path d="M-4 21.8H31.20" fill="none" stroke="#000f9f" stroke-width="4.6" stroke-linecap="round" />
+  <path d="M-4 28.6H59.36" fill="none" stroke="#EF7B10" stroke-width="4.6" stroke-linecap="round" />
+  <path d="M-4 35.4H26.08" fill="none" stroke="#00AFAD" stroke-width="4.6" stroke-linecap="round" />
+  <path d="M-4 42.2H46.56" fill="none" stroke="#00BD19" stroke-width="4.6" stroke-linecap="round" />
+  <path d="M-4 49H38.24" fill="none" stroke="#9364cc" stroke-width="4.6" stroke-linecap="round" />
 </svg>

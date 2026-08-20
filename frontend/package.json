@@ -13,7 +13,7 @@
     "ios": "npm run sync && cap open ios",
     "android": "npm run sync && cap open android",
     "icons": "node scripts/generate-icons.mjs",
-    "assets": "npx --yes @capacitor/assets generate --ios --android --iconBackgroundColor '#0b0f1a' --iconBackgroundColorDark '#0b0f1a' --splashBackgroundColor '#0b0f1a' --splashBackgroundColorDark '#0b0f1a'",
+    "assets": "npx --yes @capacitor/assets generate --ios --android --iconBackgroundColor '#f1f1ef' --iconBackgroundColorDark '#f1f1ef' --splashBackgroundColor '#0b0f1a' --splashBackgroundColorDark '#0b0f1a'",
     "models": "node scripts/generate-models/index.mjs",
     "static-data": "node scripts/generate-static-data.mjs"
   },

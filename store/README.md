@@ -45,6 +45,24 @@ Alpha is the easy one to get wrong: sharp applies `flatten` *before* `composite`
 in its fixed pipeline, so flattening in the same chain that composites the map
 still hands back a 32-bit PNG.
 
+## The icon is shared with the app, not just the listing
+
+App Store Connect takes the iOS marketing icon from the binary's asset
+catalogue rather than from an upload, so the listing icon and the app icon have
+to be the same mark or the listing contradicts itself. Both now come from
+`iconStreaks()` in `scripts/store-assets/lib/streaks.mjs`:
+
+| Consumer | Written by |
+|---|---|
+| `store/build/app-icon-{512,1024}.png`, Play's `icon.png` | `npm run store` |
+| `frontend/assets/`, `frontend/public/` icons | `npm run icons` (frontend) |
+| iOS `AppIcon.appiconset/`, Android `mipmap-*/` | `npm run assets` (frontend) |
+
+Change the mark in `streaks.mjs`, then run all three. `frontend/public/favicon.svg`
+is a hand-kept copy of the same geometry — it has to be a literal SVG for the
+tab strip — so check it against `iconStreaks({ background: '#f1f1ef', size: 64 })`
+if the mark moves.
+
 ## The map imagery is a stand-in
 
 By default the map inside each frame is drawn from the app's own route geometry
@@ -62,11 +80,6 @@ used.
   `https://watchlondonmove.maybeitssoftware.co.uk/privacy`, which is where it
   ought to live — but nothing is published there yet, and both stores require a
   reachable policy. Publish the page or change the file.
-- **The app icon in the binary.** App Store Connect takes the iOS marketing
-  icon from the app's asset catalogue, not from an upload — so until the streak
-  mark replaces the roundel in `frontend/public/favicon.svg` and
-  `frontend/scripts/generate-icons.mjs`, the icon on the iOS listing will still
-  be the old roundel while `store/build/app-icon-1024.png` shows the new one.
 - **Crash reporting vs the privacy manifest.** `deploy.yml` builds the store
   binaries with `VITE_SENTRY_DSN` set from a secret, so a shipped build sends
   crash reports to Sentry. `PrivacyInfo.xcprivacy` declares
