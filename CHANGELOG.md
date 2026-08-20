@@ -1,3 +1,10 @@
+## [0.3.4](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.3...v0.3.4) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** verify the deploy landed instead of parsing a status line ([75288df](https://github.com/MaybeItsSoftware/watch-london-move/commit/75288df1f358ba472f19b85190529b927d0b3fbe))
+
 ## [0.3.3](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.2...v0.3.3) (2026-08-20)
 
 
