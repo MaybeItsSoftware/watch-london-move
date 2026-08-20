@@ -148,12 +148,44 @@ jobs:
         run: |
           mkdir -p ../.vercel/output/static
           cp -R dist/. ../.vercel/output/static/
-          cp vercel-output-config.json ../.vercel/output/config.json
+          # The "//" keys in vercel-output-config.json are documentation for
+          # humans, and Vercel's Build Output schema rejects unknown properties:
+          # with them present the upload succeeds and the deployment then fails
+          # at "Deploying outputs..." with no message at all. Strip them here so
+          # the committed file can stay annotated.
+          node -e "
+            const fs = require('fs');
+            const strip = (v) => Array.isArray(v) ? v.map(strip)
+              : (v && typeof v === 'object'
+                ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== '//').map(([k, x]) => [k, strip(x)]))
+                : v);
+            const cfg = strip(JSON.parse(fs.readFileSync('vercel-output-config.json', 'utf8')));
+            fs.writeFileSync('../.vercel/output/config.json', JSON.stringify(cfg));
+          "
 
       - name: Deploy
         working-directory: .
         run: |
+          set -euo pipefail
           npx --yes vercel@latest deploy --prebuilt ${{ steps.target.outputs.prod }} \
             --token="${{ secrets.VERCEL_TOKEN }}" \
             --yes | tee deploy-url.txt
-          echo "Deployed: $(tail -1 deploy-url.txt)" >> "$GITHUB_STEP_SUMMARY"
+          URL="$(grep -oE 'https://[^ ]+\.vercel\.app' deploy-url.txt | tail -1)"
+          echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+          # `vercel deploy` exits 0 once the upload is accepted, *before* the
+          # deployment is known to be good — a deployment that errors while
+          # deploying its outputs still leaves this job green. Poll until it
+          # settles and fail on anything but READY, or a broken production
+          # deploy reports success forever.
+          for i in $(seq 1 40); do
+            STATE="$(npx --yes vercel@latest inspect "$URL" --token="${{ secrets.VERCEL_TOKEN }}" 2>&1 \
+              | grep -oE 'status[[:space:]]+[A-Z]+' | awk '{print $2}' | tail -1)"
+            case "$STATE" in
+              READY) echo "Deployment READY"; exit 0 ;;
+              ERROR|CANCELED) echo "::error::Vercel deployment finished in state $STATE"; exit 1 ;;
+              *) sleep 15 ;;
+            esac
+          done
+          echo "::error::Vercel deployment did not settle within 10 minutes"
+          exit 1
