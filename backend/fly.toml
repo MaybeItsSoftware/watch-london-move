@@ -1,4 +1,15 @@
-# Fly is the reasonable managed option here: $0.02/GB egress, roughly a fifth of
+# ─────────────────────────────────────────────────────────────────────────────
+# NOT THE DEPLOYMENT TARGET. The backend deploys to Railway; see railway.toml
+# and DEPLOY.md. This file is kept only because the sizing and concurrency
+# rationale below is still the best record of why the service is shaped the way
+# it is — the numbers were measured, not guessed.
+#
+# Nothing here is applied to anything. In particular `hard_limit = 400` no
+# longer bounds connections: Railway has no equivalent, so that ceiling now
+# lives in the process as MAX_CONNECTIONS (config.js).
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Fly was the reasonable managed option here: $0.02/GB egress, roughly a fifth of
 # hyperscaler pricing, on a workload that is almost entirely egress. A plain
 # Hetzner/OVH VPS with bundled bandwidth is cheaper again — see DEPLOY.md.
 app = "watch-london-move"

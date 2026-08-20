@@ -56,6 +56,65 @@ gh secret set MATCH_GIT_SSH_KEY < key    # match-certs read-only deploy key
 `.p8` is base64 of the *full* PEM including armor; parse `.env` splitting on
 the first `=` only.
 
+## Web deployment (Vercel)
+
+`.github/workflows/web.yml` deploys the frontend. A pull request gets a preview
+deployment; production rides the same release gate as the store builds, so web
+and native never diverge on the wire protocol they share with the backend.
+
+The build is done with `npm run build` rather than `vercel build`, because the
+Sentry release name is not knowable until the tag exists and the source maps have
+to be uploaded and then deleted before anything is published. The output is
+assembled into Vercel's Build Output API format from
+`frontend/vercel-output-config.json`, which is where the caching and SPA routing
+rules live.
+
+Setup, once:
+
+```sh
+cd frontend
+npx vercel link            # "Set up new project" — decline the Git connection
+cat .vercel/project.json   # orgId + projectId → the GitHub secrets below
+```
+
+- **Create the project without Git integration**, as above. This is not optional
+  housekeeping: a Vercel Hobby account cannot connect a repository owned by a
+  GitHub *organisation*, and this repo lives under `MaybeItsSoftware`. Because CI
+  uploads a finished build rather than letting Vercel clone and build, Vercel
+  never sees the repository and the restriction never applies — but importing
+  from Git in the dashboard would walk straight into it and look like a billing
+  problem rather than a setup one.
+- Git integration would not work here anyway: the build needs
+  `VITE_SENTRY_RELEASE` from the git tag, and the source maps must be uploaded to
+  Sentry and then deleted before anything is published. Vercel's builder can do
+  neither.
+- Add **watchlondonmove.maybeitssoftware.co.uk** to the project. `--prod` deploys
+  to whatever production domains the project carries, so the workflow never needs
+  to know the hostname. DNS for `maybeitssoftware.co.uk` is at Spaceship, not
+  Vercel, so the CNAME has to be added there by hand.
+- No Root Directory or build command — CI ships prebuilt output.
+- Preview comments on pull requests are a Git-integration feature and will not
+  appear. `web.yml` deploys previews itself and writes the URL to the job summary.
+
+## Secrets
+
+Beyond the signing material above:
+
+| Secret | Used by | Notes |
+|---|---|---|
+| `VERCEL_TOKEN` | web.yml | Account or team token. |
+| `VERCEL_ORG_ID` | web.yml | From `.vercel/project.json` after `vercel link`, or the dashboard. |
+| `VERCEL_PROJECT_ID` | web.yml | Same. |
+| `SENTRY_DSN` | web.yml, deploy.yml | Inlined into the bundle. Unset ⇒ no SDK in the build at all. |
+| `SENTRY_AUTH_TOKEN` | web.yml | Source-map upload only. Unset ⇒ upload skipped, pipeline still succeeds. |
+| `SENTRY_ORG`, `SENTRY_PROJECT` | web.yml | Ditto. |
+
+Source maps are uploaded **once**, by web.yml, under the release tag. The web and
+both native bundles are byte-identical for a given tag — the platform is derived
+at runtime from `IS_NATIVE` rather than inlined — so one upload symbolicates all
+three. If that ever stops being true, native crashes will silently arrive
+unsymbolicated; see the comment in `frontend/src/error-reporting.ts`.
+
 ## One-time store onboarding (not yet done)
 
 - [ ] **Apple**: register the App ID `uk.co.maybeitssoftware.watchlondonmove`
@@ -69,11 +128,16 @@ the first `=` only.
       into Play App Signing, and invite
       `github-actions-deployer@maybeitssoftware.iam.gserviceaccount.com` as
       release manager scoped to this app.
-- [ ] **PrivacyInfo.xcprivacy**: iOS App Store submission requires a privacy
-      manifest; the app collects nothing, but the file (declaring e.g.
-      UserDefaults use by Capacitor) still needs adding to the Xcode project.
+- [x] **PrivacyInfo.xcprivacy**: added at `frontend/ios/App/App/PrivacyInfo.xcprivacy`
+      and wired into the Xcode project's Resources build phase. Declares no
+      collected data and the required-reason APIs the Capacitor runtime uses.
+      **Re-check it whenever a Capacitor plugin is added or upgraded** — a new
+      plugin reaching a new API category is the usual cause of a surprise
+      rejection at upload.
 - [ ] Reconsider the OpenFreeMap basemap dependency before a public release
-      (see `frontend/MOBILE.md`).
+      (see `frontend/MOBILE.md`). The app now degrades honestly when it fails —
+      a "Basemap unavailable" notice, with vehicles still live — but it is still
+      a free keyless server with no SLA in front of every session.
 
 ## Versioning mechanics
 

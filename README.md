@@ -18,8 +18,20 @@ current apps.
   canonicalises vehicles into 9-element tuples with a string table,
   partitions them into geographic tiles, and emits full/delta payloads
   per subscribed tile. Route geometry is built from TfL route sequences
-  and checkpointed to disk. See [`backend/DEPLOY.md`](backend/DEPLOY.md)
-  for Fly.io deployment and cost model.
+  and checkpointed to disk. Deploys to Railway from
+  [`backend/railway.toml`](backend/railway.toml); see
+  [`backend/DEPLOY.md`](backend/DEPLOY.md) for the cost model, the
+  dashboard-only settings that config cannot express, and the pre-flight
+  checklist.
+
+  Every path that is cheap to ask for and expensive to serve carries a
+  token-bucket budget ([`rate-limit.js`](backend/src/rate-limit.js)),
+  shared between the HTTP routes and the socket handlers so a client
+  cannot dodge one budget by using the other. Egress is the whole bill,
+  and `vehicles:request-full` in particular is a few bytes in and a
+  per-tile encode of the visible fleet out. `/health` serves liveness
+  publicly and its metrics — bandwidth, cost, poll internals — only to a
+  caller holding `METRICS_TOKEN`.
 
   The whole-network bus feed — one request covering all ~640 routes, and
   ~80 MB of JSON in reply — is fetched, parsed and reduced on a worker
@@ -64,6 +76,15 @@ current apps.
   `frontend/` after editing
   [`scripts/generate-models/`](frontend/scripts/generate-models/).
 
+  On the web it lives at **watchlondonmove.maybeitssoftware.co.uk**, on its
+  own subdomain rather than as a path under the MaybeItsSoftware site.
+  Browser storage quota is granted per origin and evicted per origin, and
+  the service worker below caches ~5 MB whose entire purpose is to make
+  the second visit free — on a shared origin that cache is the first
+  casualty of a neighbouring app's growth, silently, and egress is the
+  whole hosting bill. `base: './'` means the build would work under a
+  subdirectory too; this is a deployment choice, not a constraint.
+
   On the web it is also an installable PWA: a hand-written service worker
   ([`public/sw.js`](frontend/public/sw.js)) caches the shell, the chunks
   and the bundled data, and
@@ -107,6 +128,21 @@ collection when the backend reports a *newer* build than the manifest
 baked into the JS bundle. With no bundled copy (a dev checkout, or a
 build where the script was never run) it falls back to fetching
 `/routes` with the original backoff and progressive top-up.
+
+## Tests
+
+```sh
+cd backend && npm test      # node:test, no extra dependencies
+```
+
+Covers the pure logic the wire format depends on: tile bucketing and
+viewport resolution, tuple encoding and its validation gate, the delta
+and prune behaviour of the state store, the rate limiter, and station
+name canonicalisation. These run in CI on every push and pull request,
+and gate the release and deploy pipelines.
+
+The frontend has no test suite; `npm run build` typechecks it (`tsc -b`)
+and `npm run lint` is oxlint.
 
 ## Local development
 

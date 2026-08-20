@@ -142,13 +142,15 @@ for the pipeline and the remaining one-time store onboarding steps.
 
 ## Not done
 
-- No `PrivacyInfo.xcprivacy`. The app collects nothing, but iOS 17+ requires the
-  file for App Store submission.
+- Basemap tiles come from OpenFreeMap, a free keyless public server. A failed
+  style load now raises a "Basemap unavailable" notice and the vehicle layers
+  keep running, so the failure is visible rather than a blank screen — but the
+  dependency itself is still worth reconsidering before a store release.
 - The JS is ~2.2 MB across three chunks: `maplibre` (1.0 MB), the app and
   eager deck.gl (0.9 MB), and `model-layers` (0.25 MB, fetched only when the
   camera first reaches the zoom that draws 3D models). MapLibre is the bulk of
   a cold start in a WebView and cannot be deferred — the map is the app — so
   further work here means a lighter renderer, not more splitting.
-- Basemap tiles come from OpenFreeMap, a free keyless public server, with no
-  offline handling or error state. Fine for development; a dependency worth
-  reconsidering before a store release.
+- The privacy manifest is at `ios/App/App/PrivacyInfo.xcprivacy`. It declares no
+  collected data; re-check the required-reason API list when a Capacitor plugin
+  is added or upgraded.
