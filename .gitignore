@@ -41,8 +41,7 @@
 /.vercel
 /frontend/.vercel
 
-# Store artwork samples (not release assets)
-store/samples/
-store/samples-arrow/
-store/samples-flow/
-store/samples-type/
+# Aesthetic explorations, regenerable from scripts/store-assets/explorations/
+store/explorations/
+
+.DS_Store

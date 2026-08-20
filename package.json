@@ -1,10 +1,11 @@
 {
   "name": "watch-london-move",
   "private": true,
-  "description": "Live map of London's public transport — root orchestration scripts",
+  "description": "Live map of London's public transport \u2014 root orchestration scripts",
   "scripts": {
     "dev": "./dev.sh",
     "build": "npm run build --prefix frontend",
+    "store": "node scripts/store-assets/build.mjs",
     "lint": "npm run lint --prefix frontend",
     "typecheck": "npm run typecheck --prefix frontend",
     "smoke": "npm run smoke --prefix backend",
