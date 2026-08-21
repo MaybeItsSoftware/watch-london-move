@@ -1,3 +1,11 @@
+## [0.5.3](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.2...v0.5.3) (2026-08-21)
+
+
+### Bug Fixes
+
+* **backend:** let smoke.js pass against the default rate limit and auth gate ([611386c](https://github.com/MaybeItsSoftware/watch-london-move/commit/611386cbc852712ec61cf8af28276017de6f46ab))
+* **frontend:** point the shipped clients at the custom backend domain ([236e6e1](https://github.com/MaybeItsSoftware/watch-london-move/commit/236e6e1bc924b9f2830623ef3a40612ac71384b8))
+
 ## [0.5.2](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.1...v0.5.2) (2026-08-21)
 
 
