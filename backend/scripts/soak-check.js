@@ -116,11 +116,17 @@ async function main() {
 
   const dropped = feed.dropped ?? {};
   const droppedTotal = Object.values(dropped).reduce((sum, n) => sum + (n || 0), 0);
+  // Proportional, not absolute. TfL reliably serves about one malformed row per
+  // hundred thousand — a null stop code — and warning on that every 40 minutes
+  // would turn this check into wallpaper. What matters is a trend.
+  const dropRate = feed.rows > 0 ? droppedTotal / feed.rows : 0;
   checks.push(
     droppedTotal === 0
       ? check('row drops', PASS, 'none')
-      : check('row drops', WARN, JSON.stringify(dropped),
-          'A rising trend means the feed is changing under us.'),
+      : dropRate < 0.001
+        ? check('row drops', PASS, `${droppedTotal} of ${feed.rows} rows (${(dropRate * 100).toFixed(3)}%)`)
+        : check('row drops', WARN, `${JSON.stringify(dropped)} — ${(dropRate * 100).toFixed(2)}% of rows`,
+            'Above the usual noise floor; the feed may be changing under us.'),
   );
 
   // The headline win. If this is not far below the Unified baseline of ~49s,
