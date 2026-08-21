@@ -1,3 +1,15 @@
+# [0.5.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.4.0...v0.5.0) (2026-08-21)
+
+
+### Bug Fixes
+
+* **backend:** keep Tramlink out of the URA bus feed ([5e8d47a](https://github.com/MaybeItsSoftware/watch-london-move/commit/5e8d47a527c1df904c4d5741bb10b64c09fbca4b))
+
+
+### Features
+
+* **backend:** read bus arrivals from TfL's URA interface ([a681e45](https://github.com/MaybeItsSoftware/watch-london-move/commit/a681e452add0454705ff66a3d934071efb618f66))
+
 # [0.4.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.3.4...v0.4.0) (2026-08-20)
 
 
