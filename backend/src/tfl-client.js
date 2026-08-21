@@ -78,6 +78,9 @@ class TflClient {
     });
     /** Feed clock from the last URA header row, for skew reporting. */
     this.uraFeedClockMs = null;
+    /** Lowercased TfL bus line ids, for the URA route allowlist. Null until loaded. */
+    this.busLineAllowlist = null;
+    this.busLineAllowlistAt = 0;
     this.uraStats = null;
 
     this.cache = {
@@ -707,6 +710,39 @@ class TflClient {
   }
 
   // The set of bus routes changes rarely; callers cache the result.
+  /**
+   * The set of line names URA rows are accepted under, lowercased.
+   *
+   * URA answers for more than TfL's bus network: Tramlink runs through it as
+   * routes T2 and T3, which the Unified bus feed omits entirely. Those trams
+   * already reach the map through the rail path, so without this they arrive a
+   * second time wearing bus livery — the same vehicle drawn twice, in two
+   * colours, a few metres apart.
+   *
+   * Also protects the route-geometry join: a line name with no matching TfL id
+   * has no path to snap to, so its vehicles would silently fall back to gliding
+   * in straight lines. Refreshed on the stop-index TTL because the bus network
+   * changes about as often.
+   */
+  async busLineNames() {
+    const now = Date.now();
+    if (this.busLineAllowlist && now < this.busLineAllowlistAt) {
+      return this.busLineAllowlist;
+    }
+    try {
+      const ids = await this.fetchBusLineIds();
+      if (ids.length > 0) {
+        this.busLineAllowlist = new Set(ids.map((id) => String(id).toLowerCase()));
+        this.busLineAllowlistAt = now + this.config.stopPointCacheMs;
+      }
+    } catch (error) {
+      // Never fatal: an empty allowlist would drop the entire fleet, which is a
+      // far worse failure than letting four trams through.
+      logger.warn({ err: error.message }, 'Could not refresh the bus line allowlist');
+    }
+    return this.busLineAllowlist;
+  }
+
   async fetchBusLineIds() {
     const lines = await this.getJsonWithRetry(
       '/Line/Mode/bus',
@@ -948,9 +984,17 @@ class TflClient {
       signal: AbortSignal.timeout(this.config.uraTimeoutMs),
     });
 
+    const allowed = await this.busLineNames();
     const accumulator = TflClient.arrivalAccumulator(fetchedAtMs, this.config.scheduleStops);
+    let rejectedLines = 0;
     const reader = createUraRowReader({
-      onArrival: (arrival) => accumulator.add(arrival),
+      onArrival: (arrival) => {
+        if (allowed && !allowed.has(String(arrival.lineName).toLowerCase())) {
+          rejectedLines += 1;
+          return;
+        }
+        accumulator.add(arrival);
+      },
       onHeader: (clockMs) => { this.uraFeedClockMs = clockMs; },
     });
 
@@ -966,7 +1010,7 @@ class TflClient {
       response.data.on('end', resolve);
       response.data.on('error', reject);
     });
-    this.uraStats = reader.end();
+    this.uraStats = { ...reader.end(), rejectedLines };
 
     return accumulator
       .finish()
