@@ -1,3 +1,10 @@
+## [0.5.2](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.1...v0.5.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **backend:** judge URA row drops by rate, not by presence ([ba939e2](https://github.com/MaybeItsSoftware/watch-london-move/commit/ba939e2314c272d61bd28b216e57d2d417345cbf))
+
 ## [0.5.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.0...v0.5.1) (2026-08-21)
 
 
