@@ -46,3 +46,7 @@
 
 # Derived: a by-device symlink view of fastlane/screenshots/en-GB, for browsing.
 /store/preview/
+
+# Soak-test samples from the URA migration (scripts/soak-check.js). Local
+# observation notes, not repository content.
+/.soak
