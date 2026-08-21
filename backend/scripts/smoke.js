@@ -1,7 +1,28 @@
 // Smoke test against a live backend: node scripts/smoke.js
 // Requires the server to be running (BACKEND_URL, default http://localhost:4010).
+//
+// Set METRICS_TOKEN to whatever the server was started with: /health withholds
+// everything but liveness from an unauthenticated caller, and most of what
+// checkHealth reads lives behind that.
 
 const BASE_URL = process.env.BACKEND_URL || 'http://localhost:4010';
+const METRICS_TOKEN = process.env.METRICS_TOKEN || '';
+// Two responses are operator-gated — /health's metrics and /snapshot?details=1
+// — and neither errors without the token. They return a valid, smaller body,
+// so an unauthenticated run fails as a missing key and reads like a broken
+// server rather than a missing secret.
+const METRICS_AUTH = METRICS_TOKEN ? { Authorization: `Bearer ${METRICS_TOKEN}` } : undefined;
+
+// A full run deliberately spends more than the default 60-token bucket holds —
+// /routes alone is fetched nine times to prove its transport, at 10 tokens each
+// — so being rate-limited partway through is the expected path, not a failure.
+// Waiting out the refill is what a well-behaved client does; doing it here also
+// makes this the only thing that checks Retry-After tells the truth. Bounded so
+// a genuinely stuck bucket still ends the run rather than hanging CI.
+const MAX_RATE_LIMIT_WAIT_MS = 240000;
+let rateLimitWaitMs = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function fail(message) {
   console.error(`FAIL: ${message}`);
@@ -15,26 +36,79 @@ function assert(condition, message) {
 }
 
 async function get(path, { headers, allowedStatuses = [200] } = {}) {
-  let response;
-  try {
-    // undici decompresses transparently but leaves the encoding on the headers,
-    // so the checks below can still see what actually came over the wire.
-    response = await fetch(`${BASE_URL}${path}`, { headers });
-  } catch (error) {
-    fail(`${path} unreachable at ${BASE_URL} (${error.message}) — is the server running?`);
+  for (;;) {
+    let response;
+    try {
+      // undici decompresses transparently but leaves the encoding on the headers,
+      // so the checks below can still see what actually came over the wire.
+      // eslint-disable-next-line no-await-in-loop -- retry loop, not a hot path
+      response = await fetch(`${BASE_URL}${path}`, { headers });
+    } catch (error) {
+      fail(`${path} unreachable at ${BASE_URL} (${error.message}) — is the server running?`);
+    }
+
+    if (response.status === 429 && !allowedStatuses.includes(429)) {
+      // eslint-disable-next-line no-await-in-loop
+      const waitMs = await rateLimitPause(path, response);
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(waitMs);
+      continue;
+    }
+
+    assert(allowedStatuses.includes(response.status), `${path} returned HTTP ${response.status}, expected ${allowedStatuses.join(' or ')}`);
+    return response;
   }
-  assert(allowedStatuses.includes(response.status), `${path} returned HTTP ${response.status}, expected ${allowedStatuses.join(' or ')}`);
-  return response;
 }
 
-async function getJson(path, allowedStatuses = [200]) {
-  const response = await get(path, { allowedStatuses });
+/**
+ * Validates a 429 and returns how long to wait before retrying. A client that
+ * cannot read Retry-After has to guess, and the usual guess is to hammer — so
+ * the header being present, integral and matching the body is a contract worth
+ * asserting rather than merely obeying.
+ */
+async function rateLimitPause(path, response) {
+  const retryAfter = Number(response.headers.get('retry-after'));
+  assert(
+    Number.isInteger(retryAfter) && retryAfter > 0,
+    `${path} 429 Retry-After is ${JSON.stringify(response.headers.get('retry-after'))}, expected whole seconds`,
+  );
+  const body = await response.json().catch(() => ({}));
+  assert(
+    body.retryAfterSec === retryAfter,
+    `${path} 429 body retryAfterSec ${body.retryAfterSec} disagrees with Retry-After ${retryAfter}`,
+  );
+
+  // A quarter-second past the advertised moment: the bucket refills on a clock
+  // the client cannot see exactly, and retrying a hair early spends the whole
+  // wait for nothing.
+  const waitMs = retryAfter * 1000 + 250;
+  rateLimitWaitMs += waitMs;
+  assert(
+    rateLimitWaitMs <= MAX_RATE_LIMIT_WAIT_MS,
+    `spent over ${MAX_RATE_LIMIT_WAIT_MS / 1000}s rate-limited — the bucket is not refilling `
+      + '(RATE_HTTP_REFILL at zero?), or another client is sharing this address',
+  );
+  console.error(`  … rate limited on ${path}, waiting ${retryAfter}s`);
+  return waitMs;
+}
+
+async function getJson(path, allowedStatuses = [200], headers) {
+  const response = await get(path, { allowedStatuses, headers });
   return { status: response.status, body: await response.json() };
 }
 
 async function checkHealth() {
-  const { body } = await getJson('/health');
+  const { body } = await getJson('/health', [200], METRICS_AUTH);
   assert(body.status === 'ok', `/health status is ${body.status}, expected ok`);
+
+  if (!('metrics' in body)) {
+    fail(
+      METRICS_TOKEN
+        ? '/health served liveness only despite METRICS_TOKEN — it does not match the server\'s'
+        : '/health serves liveness only to an unauthenticated caller. Set METRICS_TOKEN to '
+          + 'the value the server was started with.',
+    );
+  }
 
   ['routeLinesLoaded', 'routeLoadComplete', 'storeSize', 'prunedTotal', 'emitTick', 'lastDeltaSize'].forEach((key) => {
     assert(key in body, `/health missing key: ${key}`);
@@ -105,8 +179,14 @@ async function checkSnapshot() {
   assertPayloadShape('/snapshot', body);
   assert(!('details' in body), '/snapshot carried details without being asked for them');
 
-  const { body: detailed } = await getJson('/snapshot?details=1');
-  assert(Array.isArray(detailed.details), '/snapshot?details=1 details is not an array');
+  const { body: detailed } = await getJson('/snapshot?details=1', [200], METRICS_AUTH);
+  assert(
+    Array.isArray(detailed.details),
+    METRICS_TOKEN
+      ? '/snapshot?details=1 details is not an array'
+      : '/snapshot?details=1 withheld details from an unauthenticated caller. Set METRICS_TOKEN '
+        + 'to the value the server was started with.',
+  );
   detailed.details.forEach((detail, i) => {
     ['id', 'destination', 'station_name'].forEach((key) => {
       assert(key in detail, `/snapshot?details=1 details[${i}] missing key: ${key}`);
