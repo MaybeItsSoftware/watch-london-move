@@ -254,13 +254,6 @@ deserves the same treatment: it is roughly half the index chunk, it versions
 independently of the app, and splitting it lets React and the app shell parse
 while it downloads.
 
-### B3 — No per-socket rate limiting
-
-`vehicles:details` caps the *ids per request* at 50 but not the request rate,
-and `viewport:set` is unbounded. Neither is expensive individually; both are
-trivially loopable by anything that can open a socket. A token bucket per socket
-is a few lines and should exist before this is public.
-
 ### P1 — `backdrop-filter` on tablets
 
 Four blurred panels compositing over a live WebGL canvas is one of the most
@@ -306,6 +299,14 @@ the comments:
   budget — is correct, and the same conclusion is easy to get wrong.
 - **Self-scheduling polls** rather than `setInterval`, so a slow cycle cannot
   stack on the next one.
+- **Per-socket rate limiting.** Every inbound socket event goes through its own
+  token bucket, and they are separate buckets rather than one pool so that a
+  client panning hard cannot spend its own ability to ask for vehicle details:
+  `viewport:set` 40 at 2/s, `vehicles:details` 20 at 2/s (on top of the 50-id
+  cap per call), `vehicles:request-full` 4 at 0.1/s because a full snapshot is
+  the expensive one. The HTTP routes have the same treatment, priced per route.
+  Sat in the backlog above as B3 ("no per-socket rate limiting") long after it
+  was built; the buckets are in `rate-limit.js` and wired at every handler.
 
 ---
 
