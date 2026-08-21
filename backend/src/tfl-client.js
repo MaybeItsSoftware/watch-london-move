@@ -76,8 +76,17 @@ class TflClient {
         'User-Agent': 'watch-london-move (+https://github.com/MaybeItsSoftware/watch-london-move)',
       },
     });
-    /** Feed clock from the last URA header row, for skew reporting. */
+    /** Feed clock from the last URA header row. */
     this.uraFeedClockMs = null;
+    /**
+     * How far behind our clock URA's was **at the moment of the fetch**.
+     *
+     * Measured then rather than recomputed on read, because the poller backs off
+     * when nobody is connected: a value derived at report time measures how long
+     * the service has been idle, not how stale the feed is, and grows without
+     * bound overnight. That reads as a frozen upstream when nothing is wrong.
+     */
+    this.uraClockSkewMs = null;
     /** Lowercased TfL bus line ids, for the URA route allowlist. Null until loaded. */
     this.busLineAllowlist = null;
     this.busLineAllowlistAt = 0;
@@ -605,9 +614,11 @@ class TflClient {
       source: this.config.busFeedSource,
       vehicles: this.cache.bus.data.length,
       ageMs,
-      // Our clock minus URA's own. A skew that grows rather than jitters means a
-      // frozen feed whose predictions all still look like the future.
-      clockSkewMs: this.uraFeedClockMs === null ? null : Date.now() - this.uraFeedClockMs,
+      // Our clock minus URA's, as it stood when the feed was read. A skew that
+      // grows across polls means a frozen upstream whose predictions all still
+      // look like the future; `ageMs` above is the separate question of when we
+      // last looked.
+      clockSkewMs: this.uraClockSkewMs,
       rows: this.uraStats?.arrivals ?? null,
       dropped: this.uraStats?.dropped ?? null,
       // Non-zero means TfL changed the response shape. That is an abort signal,
@@ -995,7 +1006,10 @@ class TflClient {
         }
         accumulator.add(arrival);
       },
-      onHeader: (clockMs) => { this.uraFeedClockMs = clockMs; },
+      onHeader: (clockMs) => {
+        this.uraFeedClockMs = clockMs;
+        this.uraClockSkewMs = Number.isFinite(clockMs) ? Date.now() - clockMs : null;
+      },
     });
 
     await new Promise((resolve, reject) => {

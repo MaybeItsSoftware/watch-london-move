@@ -76,8 +76,9 @@ async function main() {
             'ABORT: TfL has changed the response shape. Set BUS_FEED_SOURCE=unified.'),
   );
 
-  // A skew that grows rather than jitters means a frozen feed whose predictions
-  // all still look like the future — the map keeps moving and is entirely wrong.
+  // Measured at fetch time by the server, not derived here from the last poll's
+  // timestamp: the poller backs off when nobody is connected, so a read-time
+  // figure measures idleness and false-alarms overnight. Real lag is ~100ms.
   const skew = feed.clockSkewMs;
   checks.push(
     skew === null || skew === undefined
@@ -145,6 +146,21 @@ async function main() {
       ? check('churn', PASS, `${m.prunedLastPoll} pruned last poll`)
       : check('churn', WARN, `${m.prunedLastPoll} pruned of ${feed.vehicles}`,
           'Vehicles are flickering in and out; each return costs its heading.'),
+  );
+
+  // How long since the last poll is a separate question from feed lag, and it is
+  // only a fault if somebody is connected: with no clients the poller suspends
+  // deliberately, and an hours-old fleet is the design working, not failing.
+  const ageSec = feed.ageMs === null || feed.ageMs === undefined ? null : Math.round(feed.ageMs / 1000);
+  checks.push(
+    ageSec === null
+      ? check('feed age', WARN, 'not reported')
+      : m.connectedClients === 0
+        ? check('feed age', PASS, `${ageSec}s — idle, poller suspended`)
+        : ageSec < 120
+          ? check('feed age', PASS, `${ageSec}s with ${m.connectedClients} client(s)`)
+          : check('feed age', FAIL, `${ageSec}s stale with ${m.connectedClients} client(s) connected`,
+              'ABORT: clients are being served a fleet that is not being refreshed.'),
   );
 
   checks.push(
