@@ -68,9 +68,16 @@ process itself (`config.js`, `rate-limit.js`):
   public domain answers everything, so the metrics moved behind `METRICS_TOKEN`.
 
 **`*.railway.internal` is the private network hostname** and resolves only
-inside the Railway project. The frontend needs the public domain — Settings →
+inside the Railway project. The frontend needs a public domain — Settings →
 Networking → Public Networking — because it runs in a browser or a phone, not in
 the project.
+
+That domain is **`api.watchlondonmove.maybeitssoftware.co.uk`**, a custom domain
+on the service; Railway's generated `*.up.railway.app` name still answers
+alongside it. Clients are pinned to the custom one
+(`frontend/.env.production`) because the URL is inlined at build time and a
+shipped app binary cannot be repointed without a store resubmission — so the
+host it names has to be one that can outlive the service behind it.
 
 ## What keeps the bill down
 
@@ -122,11 +129,31 @@ Three things about it are worth knowing before touching that code:
    list for that reason, and asserts the response's column count and plausibility
    on every fetch. A transposition would not throw on its own — it would put
    longitude into the line name and keep running.
-3. **It is a 2012 interface TfL no longer documents.** `BUS_FEED_SOURCE=unified`
-   is the rollback and both paths mint identical `bus-<registration>` ids, so
-   switching either way does not churn the fleet.
-   `node scripts/ura-probe.js` re-verifies coverage and agreement; run it
-   periodically.
+3. **It is a 2012 interface TfL no longer documents**, and there is no second bus
+   feed. `BUS_FEED_SOURCE=unified` was the rollback during the migration; the
+   Unified bus reader, the whole-network worker thread and `TFL_BUS_LINES` were
+   all deleted once the trial ended, because a fallback nobody exercises is a
+   fallback nobody can trust, and keeping it meant maintaining two readers of
+   which only the unused one would fail quietly.
+
+### When the bus feed breaks
+
+There is nothing to switch to, so the response is to fix the reader. Two things
+watch for it, from opposite sides, daily via `.github/workflows/feed-health.yml`:
+
+- **`node scripts/feed-check.js`** (needs `METRICS_TOKEN`) reads `/health` and
+  judges what we parsed — unrecognised rows, feed clock skew, fleet size, drop
+  rate, poll latency. Non-zero exit means an abort signal.
+- **`node scripts/ura-probe.js`** asks TfL directly, comparing URA against
+  `/Mode/bus/Arrivals` for coverage and per-vehicle agreement. This is the one
+  that catches URA drifting away from the feed everyone else reads — a fault our
+  own `/health` cannot see, because a self-consistent parse of a wrong feed looks
+  perfect from the inside.
+
+The retention guard (`BUS_FEED_MIN_RETAINED_FRACTION`) means a bad response
+serves the last good snapshot rather than blanking the map, and `staleVehicleMs`
+means that snapshot is eventually served as empty rather than frozen. That buys
+hours, not days.
 
 Rail is unaffected and still uses the Unified API per line.
 

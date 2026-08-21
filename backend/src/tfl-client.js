@@ -2,13 +2,6 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
-const { Worker, isMainThread } = require('worker_threads');
-// The .js extensions are load-bearing: stream-json v3 declares "./*": "./src/*"
-// in its export map, which substitutes literally and does not resolve
-// extensions, so the extensionless specifier fails at require time.
-const { chain } = require('stream-chain');
-const { parser } = require('stream-json');
-const { streamArray } = require('stream-json/streamers/stream-array.js');
 const { canonicalizeStationName } = require('./canonicalization');
 const { createUraRowReader, uraRequestUrl } = require('./ura-feed');
 const { vehicleTypeForLine } = require('./lines');
@@ -50,8 +43,7 @@ class TflClient {
     this.http = axios.create({
       baseURL: config.tflApiBaseUrl,
       timeout: 15000,
-      // The whole-network bus feed is ~90MB of JSON (~8MB on the wire, gzipped
-      // by default), well past axios' default body ceiling.
+      // The stop-point pages run to a few MB each, past axios' default ceiling.
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
       params: {
@@ -97,117 +89,12 @@ class TflClient {
       train: { at: 0, data: [], failedLines: [] },
     };
 
-    // naptanId -> { lat, lon, name }. Arrivals carry no coordinates of their own,
-    // so every vehicle is positioned by joining its next stop against this index.
+    // naptanId -> { lat, lon, name }. Rail arrivals carry no coordinates at all,
+    // and URA's inline ones are the fallback rather than the primary (see
+    // `stopFor`), so every vehicle is positioned by joining its next stop here.
     this.stopPoints = new Map();
     this.stopPointsExpiresAt = 0;
     this.stopPointsInFlight = null;
-    // Bumped whenever the index is replaced, so the worker thread can tell
-    // whether its mirror is current without comparing 33,000 entries.
-    this.stopsEpoch = 0;
-
-    // See bus-feed-worker.js. Spawned lazily on the first whole-network poll
-    // rather than at construction: a deployment tracking a named subset of
-    // routes never uses the mode endpoint and should not carry a second thread
-    // for it, and the worker is useless before the stop index exists anyway.
-    this.busWorker = null;
-    this.busWorkerEpoch = -1;
-    this.busWorkerPending = new Map();
-    this.busWorkerRequestId = 0;
-    this.busWorkerDisabled = false;
-    this.busWorkerClosing = false;
-  }
-
-  /**
-   * The worker thread, spawned on first use. Returns null when the worker is
-   * turned off or has failed, which is the signal to run the feed in process.
-   *
-   * A failure disables it permanently rather than retrying: the reasons a worker
-   * cannot start (no `worker_threads`, a missing file, a memory ceiling) do not
-   * heal between polls, and retrying every cycle would add a spawn to the very
-   * path this exists to keep quiet.
-   */
-  ensureBusWorker() {
-    if (this.busWorkerDisabled || !this.config.busFeedWorker || !isMainThread) {
-      return null;
-    }
-    if (this.busWorker) {
-      return this.busWorker;
-    }
-
-    try {
-      const worker = new Worker(path.join(__dirname, 'bus-feed-worker.js'), {
-        workerData: { config: this.config },
-      });
-      // Unref'd so a stuck 60-second feed request can never hold the process
-      // open past the platform's kill timeout. The server's emit interval is a
-      // module-level timer, so the event loop is never resting on this alone.
-      worker.unref();
-      worker.on('message', ({ requestId, vehicles, error }) => {
-        const pending = this.busWorkerPending.get(requestId);
-        if (!pending) {
-          return;
-        }
-        this.busWorkerPending.delete(requestId);
-        if (error) {
-          pending.reject(new Error(error));
-        } else {
-          pending.resolve(vehicles);
-        }
-      });
-      worker.on('error', (error) => this.failBusWorker(error));
-      worker.on('exit', (code) => {
-        // `terminate()` resolves with a non-zero code, so a shutdown would
-        // otherwise log itself as a failure on the way out.
-        if (code !== 0 && !this.busWorkerClosing) {
-          this.failBusWorker(new Error(`bus feed worker exited with code ${code}`));
-        }
-      });
-      this.busWorker = worker;
-      logger.info('Bus feed worker started');
-      return worker;
-    } catch (error) {
-      this.failBusWorker(error);
-      return null;
-    }
-  }
-
-  /** Tear the worker down and fall back to the in-process path from here on. */
-  failBusWorker(error) {
-    if (this.busWorkerDisabled) {
-      return;
-    }
-    this.busWorkerDisabled = true;
-    logger.warn({ err: error?.message }, 'Bus feed worker failed; falling back to in-process parsing');
-    for (const pending of this.busWorkerPending.values()) {
-      pending.reject(error instanceof Error ? error : new Error(String(error)));
-    }
-    this.busWorkerPending.clear();
-    const worker = this.busWorker;
-    this.busWorker = null;
-    this.busWorkerEpoch = -1;
-    worker?.terminate().catch(() => {});
-  }
-
-  /** For `/health`: `off` was never asked for, `fallback` means it was and could
-   *  not be had, which is worth being able to see rather than infer from a stall. */
-  busFeedWorkerState() {
-    if (!this.config.busFeedWorker) {
-      return 'off';
-    }
-    if (this.busWorkerDisabled) {
-      return 'fallback';
-    }
-    return this.busWorker ? 'running' : 'idle';
-  }
-
-  /** Called from the server's shutdown path so a stuck fetch cannot hold the
-   *  process open past the platform's kill timeout. */
-  close() {
-    const worker = this.busWorker;
-    this.busWorkerClosing = true;
-    this.busWorker = null;
-    return worker ? worker.terminate().then(() => undefined) : Promise.resolve();
   }
 
   getStopPointCount() {
@@ -255,11 +142,10 @@ class TflClient {
   // Stop coordinates barely change, so a restart should not cost another 28
   // requests. Failures here are non-fatal: worst case we rebuild from the API.
   // The cached index only covers the line set it was built for, so it is keyed by
-  // that set: switching between a bus subset and the whole network must rebuild
-  // rather than silently reuse an index missing most of London's stops.
+  // that set: a change to the tracked rail lines must rebuild rather than
+  // silently reuse an index missing their stops.
   stopPointCacheKey() {
-    const lines = this.config.allBusLines ? ['bus:all'] : [...this.config.busLines].sort();
-    return [...[...this.config.trainLines].sort(), ...lines].join(',');
+    return [...[...this.config.trainLines].sort(), 'bus:all'].join(',');
   }
 
   readStopPointCache() {
@@ -346,17 +232,15 @@ class TflClient {
     const cached = this.readStopPointCache();
     if (cached) {
       this.stopPoints = cached.index;
-      this.stopsEpoch += 1;
       this.stopPointsExpiresAt = cached.builtAt + this.config.stopPointCacheMs;
       logger.info({ stops: cached.index.size }, 'Stop point index loaded from cache');
       return this.stopPoints;
     }
 
     const now = Date.now();
-    // Rail lines are few enough to fetch per line; so are bus routes when an
-    // explicit subset was configured. The whole bus network goes via the mode
-    // endpoint below instead.
-    const lineIds = [...new Set([...this.config.trainLines, ...this.config.busLines])];
+    // Rail lines are few enough to fetch per line. The ~19,000 bus stops go via
+    // the mode endpoint below instead.
+    const lineIds = [...new Set(this.config.trainLines)];
     const index = new Map();
     const failedLines = [];
 
@@ -381,7 +265,7 @@ class TflClient {
       });
     }
 
-    const busStopsComplete = this.config.allBusLines ? await this.loadBusStopPoints(index) : true;
+    const busStopsComplete = await this.loadBusStopPoints(index);
 
     if (index.size === 0) {
       // Keep any previously built index rather than losing the ability to position.
@@ -390,7 +274,6 @@ class TflClient {
     }
 
     this.stopPoints = index;
-    this.stopsEpoch += 1;
     // Only persist and fully trust a complete index — a partial one would freeze
     // its gaps in place for the whole TTL, so retry it soon instead.
     const complete = failedLines.length === 0 && busStopsComplete;
@@ -605,13 +488,13 @@ class TflClient {
 
   /**
    * What the bus feed did last cycle. The single lastPollVehicles total cannot
-   * show a bus-side regression while rail is healthy, and the whole point of the
-   * soak is to notice one.
+   * show a bus-side regression while rail is healthy, and noticing one is the
+   * whole point of scripts/feed-check.js.
    */
   busFeedStats() {
     const ageMs = this.cache.bus.at > 0 ? Date.now() - this.cache.bus.at : null;
     return {
-      source: this.config.busFeedSource,
+      source: 'ura',
       vehicles: this.cache.bus.data.length,
       ageMs,
       // Our clock minus URA's, as it stood when the feed was read. A skew that
@@ -873,114 +756,6 @@ class TflClient {
   }
 
   /**
-   * One request for every bus in London. The response replaces the ~130 per-line
-   * requests the same coverage would otherwise cost each cycle, but it is ~80MB
-   * of JSON — a `JSON.parse` that blocks the event loop for 180ms on a fast
-   * laptop and appreciably longer on a shared vCPU, plus a reduce over ~120,000
-   * rows, on a cadence every connected client would feel as a stall.
-   *
-   * So by default none of it happens here: the request, the parse and the reduce
-   * are all done in a worker thread and only the few thousand canonical records
-   * come back. `BUS_FEED_WORKER=false`, or any failure to start the thread, runs
-   * the identical code in process instead.
-   */
-  async fetchAllBusArrivals(stopPoints, fetchedAtMs) {
-    const worker = this.ensureBusWorker();
-    if (!worker) {
-      return this.fetchAllBusArrivalsInProcess(stopPoints, fetchedAtMs);
-    }
-
-    // The mirror is only re-sent when the index has actually been rebuilt, which
-    // is about once a day: it is ~33,000 entries, and a structured clone of that
-    // on every poll would put back a good part of the main-thread cost this is
-    // here to remove.
-    if (this.busWorkerEpoch !== this.stopsEpoch) {
-      worker.postMessage({ type: 'stops', epoch: this.stopsEpoch, entries: [...stopPoints] });
-      this.busWorkerEpoch = this.stopsEpoch;
-    }
-
-    const requestId = (this.busWorkerRequestId += 1);
-    const result = new Promise((resolve, reject) => {
-      this.busWorkerPending.set(requestId, { resolve, reject });
-    });
-    worker.postMessage({ type: 'fetch', requestId, fetchedAtMs, epoch: this.stopsEpoch });
-
-    try {
-      return await result;
-    } catch (error) {
-      // A worker that answered with an error is still healthy — a 429 from TfL
-      // reaches us this way — so this does not disable it. The caller already
-      // treats a throw here as "keep the previous snapshot".
-      this.busWorkerPending.delete(requestId);
-      throw error;
-    }
-  }
-
-  /**
-   * The whole-network feed as a stream, reduced row by row.
-   *
-   * The buffered path holds three large things at once: the ~8MB gzipped body,
-   * the ~90MB string it inflates to, and the ~120,000-object array that string
-   * parses into. Only the last is useful, and only a few thousand records
-   * survive the reduce — so peak memory, not steady state, is what sized this
-   * service at 4GB, and on a platform billing actual usage that peak is paid for
-   * every cycle.
-   *
-   * Streaming keeps one row in flight at a time. The accumulator holds bounded
-   * per-vehicle state and everything else is collectable as it passes.
-   *
-   * Falls back to the buffered path on any streaming failure: this runs on the
-   * worker thread where a throw costs the whole poll, and a slightly heavy poll
-   * beats no data at all.
-   */
-  async fetchAllBusArrivalsStreaming(fetchedAtMs) {
-    const response = await this.http.get('/Mode/bus/Arrivals?count=-1', {
-      responseType: 'stream',
-      timeout: this.config.busFeedTimeoutMs,
-    });
-
-    const accumulator = TflClient.arrivalAccumulator(fetchedAtMs, this.config.scheduleStops);
-    const pipeline = chain([response.data, parser(), streamArray()]);
-
-    await new Promise((resolve, reject) => {
-      pipeline.on('data', ({ value }) => accumulator.add(value));
-      pipeline.on('end', resolve);
-      pipeline.on('error', reject);
-      response.data.on('error', reject);
-    });
-
-    return accumulator.finish();
-  }
-
-  /** The whole-network feed, read on whichever thread calls this. Invoked
-   *  directly by bus-feed-worker.js, and by the dispatcher above as a fallback. */
-  async fetchAllBusArrivalsInProcess(stopPoints, fetchedAtMs) {
-    let reduced;
-    try {
-      reduced = await this.fetchAllBusArrivalsStreaming(fetchedAtMs);
-    } catch (error) {
-      this.streamingFailures = (this.streamingFailures || 0) + 1;
-      const arrivals = await this.getJsonWithRetry(
-        '/Mode/bus/Arrivals?count=-1',
-        this.config.retryCount,
-        this.config.retryBaseDelayMs,
-        { timeout: this.config.busFeedTimeoutMs },
-      );
-      reduced = TflClient.nearestStopArrivals(
-        Array.isArray(arrivals) ? arrivals : [],
-        fetchedAtMs,
-        this.config.scheduleStops,
-      );
-    }
-
-    return reduced
-      .map(({ item, schedule }) =>
-        TflClient.busVehicle(item, item.lineId, stopPoints, 'tfl-mode-arrivals', fetchedAtMs, schedule),
-      )
-      .filter(Boolean);
-  }
-
-  /**
    * The whole network from URA, reduced row by row.
    *
    * Rejects rather than returning a partial fleet: the caller caches whatever
@@ -1049,65 +824,29 @@ class TflClient {
 
     const stopPoints = await this.ensureStopPoints();
 
-    if (this.config.busFeedSource === 'ura') {
-      try {
-        const vehicles = await this.fetchUraBusArrivals(stopPoints, now);
-        const previous = this.cache.bus.data.length;
-        const floor = Math.floor(previous * this.config.busFeedMinRetainedFraction);
-        if (vehicles.length === 0 || (previous > 0 && vehicles.length < floor)) {
-          // A 200 carrying nothing usable is not success. URA answers with only a
-          // header row when it has no data, and a field-mapping slip makes every
-          // row fail the naptan guard — neither throws, so without this the map
-          // blanks and the empty result is cached as truth.
-          logger.warn(
-            { vehicles: vehicles.length, previous },
-            'URA returned an implausibly small fleet; keeping previous snapshot',
-          );
-          this.cache.bus.failedLines = ['bus (ura, implausible)'];
-          return this.cache.bus.data;
-        }
-        this.cache.bus = { at: now, data: vehicles, failedLines: [] };
-        return vehicles;
-      } catch (error) {
-        logger.warn({ err: error.message }, 'URA bus arrivals failed; keeping previous snapshot');
-        this.cache.bus.failedLines = ['bus (ura)'];
+    try {
+      const vehicles = await this.fetchUraBusArrivals(stopPoints, now);
+      const previous = this.cache.bus.data.length;
+      const floor = Math.floor(previous * this.config.busFeedMinRetainedFraction);
+      if (vehicles.length === 0 || (previous > 0 && vehicles.length < floor)) {
+        // A 200 carrying nothing usable is not success. URA answers with only a
+        // header row when it has no data, and a field-mapping slip makes every
+        // row fail the naptan guard — neither throws, so without this the map
+        // blanks and the empty result is cached as truth.
+        logger.warn(
+          { vehicles: vehicles.length, previous },
+          'URA returned an implausibly small fleet; keeping previous snapshot',
+        );
+        this.cache.bus.failedLines = ['bus (ura, implausible)'];
         return this.cache.bus.data;
       }
-    }
-
-    if (this.config.allBusLines) {
-      try {
-        const vehicles = await this.fetchAllBusArrivals(stopPoints, now);
-        this.cache.bus = { at: now, data: vehicles, failedLines: [] };
-        return vehicles;
-      } catch (error) {
-        // One request covers everything, so its failure would blank every bus on
-        // the map — keep the previous snapshot and try again next cycle.
-        logger.warn({ err: error.message }, 'Whole-network bus arrivals failed; keeping previous snapshot');
-        this.cache.bus.failedLines = ['bus (all routes)'];
-        return this.cache.bus.data;
-      }
-    }
-
-    const { vehicles, failedLines } = await this.fetchArrivalsByLine(
-      this.config.busLines,
-      (lineId, arrivals, fetchedAtMs) =>
-        TflClient.nearestStopArrivals(arrivals, fetchedAtMs, this.config.scheduleStops)
-          .map(({ item, schedule }) =>
-            TflClient.busVehicle(item, lineId, stopPoints, 'tfl-line-arrivals', fetchedAtMs, schedule),
-          )
-          .filter(Boolean),
-    );
-
-    this.cache.bus.failedLines = failedLines;
-
-    if (failedLines.length === this.config.busLines.length && this.config.busLines.length > 0) {
-      // Every line failed — keep the previous snapshot rather than blanking the map.
+      this.cache.bus = { at: now, data: vehicles, failedLines: [] };
+      return vehicles;
+    } catch (error) {
+      logger.warn({ err: error.message }, 'URA bus arrivals failed; keeping previous snapshot');
+      this.cache.bus.failedLines = ['bus (ura)'];
       return this.cache.bus.data;
     }
-
-    this.cache.bus = { at: now, data: vehicles, failedLines };
-    return vehicles;
   }
 
   async fetchTrainArrivals() {

@@ -87,23 +87,23 @@ oscillate against its own relief. Floor 15fps. Interpolation is time-based, so a
 lower rate costs smoothness and nothing else, while a saturated main thread also
 costs input latency.
 
-### 4. The backend stops blocking on the bus feed — 107ms → 7ms
+### 4. The backend stops blocking on the bus feed — 107ms → 7ms → nothing to block on
 
-`/Mode/bus/Arrivals?count=-1` is one request covering all ~640 routes, and it
-answers with ~80MB of JSON. Read on the main thread that is a single
+`/Mode/bus/Arrivals?count=-1` was one request covering all ~640 routes, and it
+answered with ~80MB of JSON. Read on the main thread that is a single
 `JSON.parse` holding the event loop, followed by a reduce over ~120,000 rows —
 and for the whole of it nothing else runs. No delta emit, no `/health`, no
-WebSocket ping, no HTTP response. Every connected client sees a stall on the
-same cadence as the poll.
+WebSocket ping, no HTTP response. Every connected client saw a stall on the same
+cadence as the poll.
 
 ```
 bare JSON.parse, 82MB body        179 ms          (bench-parse.mjs)
 ```
 
-The request, the parse and the reduce now all happen on a worker thread
-(`backend/src/bus-feed-worker.js`); only the few thousand canonical vehicle
-records cross back. Measured against a 25MB stand-in feed with a 10ms heartbeat
-standing in for a delta emit:
+The fix was a worker thread: the request, the parse and the reduce all moved off
+the main thread, and only the few thousand canonical vehicle records crossed
+back. Measured against a 25MB stand-in feed with a 10ms heartbeat standing in
+for a delta emit:
 
 ```
                 heartbeats served    worst stall
@@ -111,22 +111,38 @@ in process           7 / 14            107 ms      (blocking-test.mjs)
 worker thread       23 / 22              7 ms
 ```
 
-Half the heartbeats were simply never delivered in the in-process run. Scale for
-the real feed (~3x the body) and the shared vCPU it deploys to, and the stall
-this removes is on the order of half a second, every poll.
+Half the heartbeats were simply never delivered in the in-process run.
 
-The fallback is deliberate and total: `BUS_FEED_WORKER=false`, or any failure to
-spawn the thread, runs the identical code in process. The two paths were checked
-to produce byte-identical output (`worker-test.mjs`). `/health` reports
-`busFeedWorker: running | fallback | off`, because a silent fallback to
-in-process parsing is exactly the kind of thing that later presents as
-unexplained latency.
+**Both the worker and the feed it served are now gone.** The URA migration
+below replaced the 80MB body with a ~12MB one, and a parse that no longer blocks
+does not need a thread to hide it in — so `bus-feed-worker.js`, the epoch
+handshake that kept its stop-index mirror honest, and the `BUS_FEED_WORKER`
+switch all came out with it. The measurements stay here because they are the
+argument for why the migration was worth doing at all: the worker moved half a
+second of stall somewhere else every poll, and the cheaper feed removed it.
 
-The stop-point index (~33,000 entries) is mirrored to the worker only when it is
-rebuilt — about once a day — rather than with every poll, which would have put a
-multi-megabyte structured clone back on the main thread and undone much of the
-point. An epoch handshake makes a stale mirror an explicit error rather than a
-silently empty fleet.
+That is the general shape of the two fixes. Concurrency hides an expensive
+operation; the right feed means not performing it.
+
+### 4b. The bus feed itself gets ~7x cheaper
+
+Buses come from TfL's Countdown/URA interface rather than the Unified API,
+because URA lets the caller name the fields it wants instead of returning 22
+keys per row. Same predictions — 99.5% of matched (vehicle, stop) pairs agree
+exactly — for a fraction of the cost:
+
+```
+              wire      parsed     fetch
+Unified     8.07 MB    ~90 MB     4-11 s
+URA         2.07 MB    ~12 MB      ~1.2 s
+```
+
+Measured end to end on the deployment, the poll went from ~49s to ~1.4s. The
+Unified bus path has since been deleted rather than kept as a rollback: two
+readers for one feed is a second thing to keep correct, and the one being kept
+warm was the one nobody would notice breaking. `backend/scripts/ura-probe.js`
+re-verifies coverage and agreement against Unified on a daily schedule, which is
+the honest price of depending on an interface TfL no longer documents.
 
 ### 5. The website is installable
 
@@ -302,8 +318,8 @@ committed because they are stand-ins, not tests.
 | --- | --- |
 | Per-frame fleet rebuild | Build a 6,500-entry `Map` of vehicle-shaped objects; time 600 iterations of the row rebuild plus `bucketFleet`, once with a `{...v}` copy and once writing in place. |
 | Large-body parse cost | `JSON.stringify` 120,000 TfL-arrival-shaped rows (~82MB) and time `JSON.parse` on it. |
-| Event-loop blocking | Serve a 25MB stand-in feed from a local `http` server, run a 10ms `setInterval` heartbeat, and count how many beats are delivered during `fetchAllBusArrivals` with the worker on and off. Count the beats — do not measure the gap, because the longest stall's timer fires *after* the promise resolves and `clearInterval` will beat it. |
-| Worker equivalence | Run `fetchAllBusArrivals` against the same stand-in with `busFeedWorker` true and false and compare the serialised results. |
+| Event-loop blocking | Historical — the worker and the 80MB feed it served are both gone (§4). Served a 25MB stand-in feed from a local `http` server, ran a 10ms `setInterval` heartbeat, and counted how many beats were delivered during the whole-network fetch with the worker on and off. Count the beats — do not measure the gap, because the longest stall's timer fires *after* the promise resolves and `clearInterval` will beat it. |
+| URA against Unified | `node backend/scripts/ura-probe.js` — fetches both feeds back to back and reports wire size, parse size, latency, coverage and per-vehicle agreement. This one *is* committed, and runs daily in CI, because it guards a live dependency rather than reproducing a past measurement. |
 | Bundle | `npm run build --prefix frontend`. |
 
 For the frontend under real load, the honest tool is Chrome DevTools' performance

@@ -17,14 +17,6 @@ const trainLines = parseCsv(
 
 const tflAppKey = process.env.TFL_APP_KEY || '';
 
-// Every London bus route by default. Per-line polling would need ~130 requests a
-// cycle for that, far past even the keyed rate limit, so the whole-network
-// endpoints (/Mode/bus/Arrivals, /StopPoint/Mode/bus) are used instead — one
-// arrivals request covers all ~640 routes. Set TFL_BUS_LINES to a comma list to
-// poll a named subset per line instead.
-const busLines = parseCsv(process.env.TFL_BUS_LINES);
-const allBusLines = busLines.length === 0;
-
 // The native apps are Capacitor WebViews, whose origin is fixed by the platform
 // rather than by anything we deploy: capacitor://localhost on iOS and
 // https://localhost on Android (both set in frontend/capacitor.config.ts).
@@ -109,19 +101,17 @@ module.exports = {
   // across more messages rather than sending more of them. Halves how long a
   // revised arrival sits in the emit queue.
   emitIntervalMs: Number(process.env.EMIT_INTERVAL_MS || 5000),
-  // The whole-network bus feed is ~8MB gzipped, so it refreshes on its own
-  // slower cadence (every other poll) rather than every cycle.
-  busCacheWindowMs: Number(process.env.BUS_CACHE_WINDOW_MS || (allBusLines ? 25000 : 10000)),
+  // Every bus in London arrives in one URA request, cheap enough to ask for on
+  // any cadence. What sets this is TfL's own: predictions are revised on roughly
+  // this beat, so polling faster costs requests and returns the same numbers.
+  busCacheWindowMs: Number(process.env.BUS_CACHE_WINDOW_MS || 25000),
   trainCacheWindowMs: Number(process.env.TRAIN_CACHE_WINDOW_MS || 10000),
-  // The whole-network feed takes ~10s to transfer, well past the default timeout.
-  busFeedTimeoutMs: Number(process.env.BUS_FEED_TIMEOUT_MS || 60000),
   // --- Bus source ---
-  // 'ura' | 'unified'. TfL's Countdown/URA interface serves the same predictions
-  // as /Mode/bus/Arrivals for a fraction of the cost — measured on the whole
-  // network, 2.07MB on the wire against 8.07MB, and 12MB to parse against 90MB,
-  // with identical route coverage. It is also a 2012 interface TfL no longer
-  // documents, so 'unified' stays one restart away.
-  busFeedSource: process.env.BUS_FEED_SOURCE === 'unified' ? 'unified' : 'ura',
+  // Buses come from TfL's Countdown/URA interface. It serves the same predictions
+  // as the Unified API's /Mode/bus/Arrivals for a fraction of the cost — measured
+  // on the whole network, 2.07MB on the wire against 8.07MB and 12MB to parse
+  // against 90MB, with identical route coverage — and it is now the only bus
+  // path. See ../DEPLOY.md for what that costs us.
   uraBaseUrl: process.env.URA_BASE_URL || 'https://countdown.api.tfl.gov.uk',
   // Charing Cross and a wide radius. The furthest stop in the network is 34.8km
   // out, and row counts are identical from 40km up to 500km, so the margin costs
@@ -186,12 +176,6 @@ module.exports = {
   // checkpointed to disk this often and resumes there after a restart.
   routeCheckpointEvery: Math.max(1, Number(process.env.ROUTE_CHECKPOINT_EVERY || 5)),
   routeSimplifyToleranceDeg: Number(process.env.ROUTE_SIMPLIFY_TOLERANCE_DEG || 0.00008),
-  // The whole-network bus feed's request, its ~80MB JSON.parse and the reduce
-  // over ~120,000 rows all run on a worker thread, so a poll no longer stalls
-  // every connected client for the duration. Set to `false` to run it in
-  // process — the code path is identical, it just blocks the event loop. See
-  // bus-feed-worker.js.
-  busFeedWorker: process.env.BUS_FEED_WORKER !== 'false',
   // socket.io leaves permessage-deflate off by default. These payloads are
   // repetitive JSON with clustered coordinates and compress about 6-8x, which
   // on a workload that is almost entirely egress is worth the CPU.
@@ -264,8 +248,6 @@ module.exports = {
   isProduction,
   warnings,
   trainLines,
-  busLines,
-  allBusLines,
   tflApiBaseUrl: process.env.TFL_API_BASE_URL || 'https://api.tfl.gov.uk',
   tflAppId: process.env.TFL_APP_ID || '',
   tflAppKey,

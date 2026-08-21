@@ -231,15 +231,13 @@ class RouteSequences {
     return coordinates;
   }
 
-  // Every line whose geometry we want: rail always, plus either the configured
-  // bus subset or — by default — every bus route TfL lists.
+  // Every line whose geometry we want: the rail lines, plus every bus route TfL
+  // lists.
   async targetLineIds() {
-    const busLines = this.config.allBusLines
-      ? await this.tflClient.fetchBusLineIds().catch((error) => {
-          logger.warn({ err: error.message }, 'Could not list bus routes; loading rail geometry only');
-          return [];
-        })
-      : this.config.busLines;
+    const busLines = await this.tflClient.fetchBusLineIds().catch((error) => {
+      logger.warn({ err: error.message }, 'Could not list bus routes; loading rail geometry only');
+      return [];
+    });
     return [...new Set([...this.config.trainLines, ...busLines])];
   }
 

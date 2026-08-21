@@ -20,8 +20,6 @@ primary_region = "lhr"
 
 [env]
   PORT = "4010"
-  # Whole-network bus feed; see config.js.
-  TFL_BUS_LINES = ""
   # Browser origins only — the Capacitor WebView origins the native apps use are
   # always allowed (see config.js). Set this to the web frontend's origin once
   # it has one; it otherwise defaults to the Vite dev server.

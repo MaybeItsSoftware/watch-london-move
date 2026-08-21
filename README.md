@@ -33,15 +33,15 @@ current apps.
   publicly and its metrics — bandwidth, cost, poll internals — only to a
   caller holding `METRICS_TOKEN`.
 
-  The whole-network bus feed — one request covering all ~640 routes, and
-  ~80 MB of JSON in reply — is fetched, parsed and reduced on a worker
-  thread ([`bus-feed-worker.js`](backend/src/bus-feed-worker.js)); only
-  the few thousand canonical records cross back. Read on the main thread
-  it stalled every connected client for the length of a `JSON.parse`,
-  measured at 107 ms for a 25 MB stand-in and considerably worse on the
-  shared vCPU this deploys to. `BUS_FEED_WORKER=false` runs the identical
-  code in process, which is also the automatic fallback if the thread
-  cannot start; `/health` reports which is in use.
+  Every bus in London arrives in one request to TfL's Countdown/URA
+  interface ([`ura-feed.js`](backend/src/ura-feed.js)), reduced row by row
+  as it streams. The Unified API's `/Mode/bus/Arrivals` carries the same
+  predictions — 99.5% of matched (vehicle, stop) pairs agree exactly — but
+  returns 22 keys per row where URA lets the caller name the fields it
+  wants: 2.07 MB on the wire against 8.07 MB, and a poll of ~1.4 s against
+  ~49 s. URA is undocumented, so
+  [`ura-probe.js`](backend/scripts/ura-probe.js) re-checks it against the
+  Unified feed daily.
 
   The last tuple field is the vehicle's `schedule`: the stops *after* the
   one it is currently heading for, flattened to `[lat, lon, secs]`

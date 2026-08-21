@@ -283,7 +283,6 @@ app.get('/health', httpRateLimit(limiters.http), (req, res) => {
     status: 'ok',
     uptimeSec: Math.round(process.uptime()),
     metrics,
-    busFeedWorker: tfl.busFeedWorkerState(),
     busFeed: tfl.busFeedStats(),
     routeLinesLoaded: routeSequences.getLoadedLineCount(),
     routeLoadComplete: routeSequences.isComplete(),
@@ -313,7 +312,7 @@ app.get('/health', httpRateLimit(limiters.http), (req, res) => {
       pollIntervalMs: config.pollIntervalMs,
       emitIntervalMs: config.emitIntervalMs,
       corsOrigins: config.corsOrigins,
-      busLines: config.allBusLines ? 'all' : config.busLines.length,
+      busLines: 'all',
       trainLines: config.trainLines.length,
       staleVehicleMs: config.staleVehicleMs,
       fullEmitEveryN: config.fullEmitEveryN,
@@ -861,11 +860,6 @@ function shutdown(signal) {
   if (pollTimer) {
     clearTimeout(pollTimer);
   }
-  // The bus feed worker holds an axios request that can legitimately be 60s
-  // long; it is unref'd so it never keeps the process alive on its own, but
-  // terminating it explicitly stops it doing pointless work while the server
-  // drains.
-  tfl.close().catch(() => {});
   io.close(() => {
     server.close(() => process.exit(0));
   });
@@ -893,11 +887,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 (async () => {
-  if (config.allBusLines) {
-    logger.info('Tracking every London bus route via the whole-network feed');
-  } else {
-    logger.info({ busLines: config.busLines.length }, 'Tracking a configured subset of bus routes');
-  }
+  logger.info('Tracking every London bus route via the URA feed');
 
   await pollAndUpdate();
   scheduleNextPoll();

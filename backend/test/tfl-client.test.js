@@ -1,11 +1,10 @@
 const assert = require('node:assert/strict');
-const { Readable } = require('node:stream');
 const { describe, it } = require('node:test');
 const { TflClient } = require('../src/tfl-client');
 
 const NOW = 1_700_000_000_000;
 
-/** A plausible /Mode/bus/Arrivals row. */
+/** A plausible arrival row, in the shape the accumulator reduces. */
 function arrival(vehicleId, naptanId, secondsAway, extra = {}) {
   return {
     vehicleId,
@@ -73,52 +72,77 @@ describe('arrivalAccumulator', () => {
   });
 });
 
-describe('fetchAllBusArrivalsStreaming', () => {
-  /** A client whose HTTP layer replays a canned body as a stream. */
-  function clientServing(body) {
+// URA is the only bus feed there is: `BUS_FEED_SOURCE=unified` is gone, so a bad
+// response has nothing to fall back to and the guards below are the whole
+// defence. They are cheap to test and expensive to be wrong about.
+describe('fetchBusArrivals', () => {
+  const fleet = (size) => Array.from({ length: size }, (_, i) => ({ id: `bus-${i}` }));
+
+  /** A client with a built stop index and a canned URA fetch. */
+  function clientReturning(vehicles) {
     const client = new TflClient({
       tflApiBaseUrl: 'https://example.invalid',
+      uraBaseUrl: 'https://example.invalid',
       scheduleStops: 3,
-      busFeedTimeoutMs: 1000,
+      // Never serve from cache unless a test asks for it.
+      busCacheWindowMs: 0,
+      staleVehicleMs: 120_000,
+      busFeedMinRetainedFraction: 0.2,
       retryCount: 0,
       retryBaseDelayMs: 1,
     });
-    client.http = {
-      get: async () => ({ data: Readable.from([Buffer.from(body)]) }),
-    };
+    client.ensureStopPoints = async () => new Map();
+    client.fetchUraBusArrivals = async () => vehicles;
     return client;
   }
 
-  it('reduces a streamed array to the same result as the buffered path', async () => {
-    const client = clientServing(JSON.stringify(FEED));
-    const streamed = await client.fetchAllBusArrivalsStreaming(NOW);
-    assert.deepEqual(streamed, TflClient.nearestStopArrivals(FEED, NOW, 3));
+  it('serves what URA returned', async () => {
+    const client = clientReturning(fleet(100));
+    assert.equal((await client.fetchBusArrivals()).length, 100);
   });
 
-  it('handles a body split across chunk boundaries mid-token', async () => {
-    // The whole point of streaming: rows arrive in TCP-sized pieces that do not
-    // respect JSON structure, so the parser must carry state across chunks.
-    const body = JSON.stringify(FEED);
-    const chunks = [];
-    for (let i = 0; i < body.length; i += 7) {
-      chunks.push(Buffer.from(body.slice(i, i + 7)));
-    }
-    const client = clientServing('');
-    client.http = { get: async () => ({ data: Readable.from(chunks) }) };
+  it('keeps the previous snapshot when the fleet collapses', async () => {
+    // URA answers 200 with only a header row when it has nothing, and a
+    // field-mapping slip fails every naptan guard. Neither throws, so without
+    // this the map blanks and the empty result is cached as the truth.
+    const client = clientReturning(fleet(100));
+    await client.fetchBusArrivals();
 
-    const streamed = await client.fetchAllBusArrivalsStreaming(NOW);
-    assert.deepEqual(streamed, TflClient.nearestStopArrivals(FEED, NOW, 3));
+    client.fetchUraBusArrivals = async () => fleet(5);
+    assert.equal((await client.fetchBusArrivals()).length, 100);
+    assert.deepEqual(client.cache.bus.failedLines, ['bus (ura, implausible)']);
   });
 
-  it('rejects on a malformed body rather than returning a partial fleet', async () => {
-    // fetchAllBusArrivalsInProcess catches this and falls back to the buffered
-    // path; returning half a fleet would be cached as if it were real.
-    const client = clientServing('[{"vehicleId":"V1","naptanId":');
-    await assert.rejects(() => client.fetchAllBusArrivalsStreaming(NOW));
+  it('accepts a drop that stays above the retention floor', async () => {
+    // Buses really do leave the road — an overnight fleet is a fraction of the
+    // peak — so the guard has to pass a large honest fall.
+    const client = clientReturning(fleet(100));
+    await client.fetchBusArrivals();
+
+    client.fetchUraBusArrivals = async () => fleet(50);
+    assert.equal((await client.fetchBusArrivals()).length, 50);
   });
 
-  it('handles an empty feed', async () => {
-    const client = clientServing('[]');
-    assert.deepEqual(await client.fetchAllBusArrivalsStreaming(NOW), []);
+  it('keeps the previous snapshot when the fetch throws', async () => {
+    const client = clientReturning(fleet(100));
+    await client.fetchBusArrivals();
+
+    client.fetchUraBusArrivals = async () => {
+      throw new Error('ECONNRESET');
+    };
+    assert.equal((await client.fetchBusArrivals()).length, 100);
+    assert.deepEqual(client.cache.bus.failedLines, ['bus (ura)']);
+  });
+
+  it('serves nothing once a failing feed is older than a vehicle may be', async () => {
+    // Returning the cached array would restamp last_seen_at on every record in
+    // upsertVehicles, so prune could never fire and the map would show a frozen
+    // fleet indefinitely with nothing raised.
+    const client = clientReturning(fleet(100));
+    await client.fetchBusArrivals();
+
+    client.config.busCacheWindowMs = 600_000;
+    client.cache.bus.at = Date.now() - 300_000;
+    assert.deepEqual(await client.fetchBusArrivals(), []);
   });
 });
