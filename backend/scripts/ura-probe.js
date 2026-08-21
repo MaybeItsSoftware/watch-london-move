@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 /**
- * Probe: can TfL's URA (Countdown) interface replace /Mode/bus/Arrivals?
+ * Probe: is TfL's URA (Countdown) interface still a faithful stand-in for
+ * /Mode/bus/Arrivals?
  *
  *   node scripts/ura-probe.js
  *
  * Fetches both feeds back to back, reduces each to canonical vehicles, and
- * reports coverage, agreement and cost. Run it before trusting the URA path,
- * and again if URA ever looks like it has drifted — it is a 2012 interface that
- * TfL no longer lists on its open-data pages, so periodic re-verification is the
- * price of using it.
+ * reports coverage, agreement and cost. It answered "yes, migrate" once; it now
+ * runs on a timer, because URA is a 2012 interface TfL no longer lists on its
+ * open-data pages and periodic re-verification is the price of using it.
+ *
+ * This talks to TfL directly rather than to our own service, which is the point:
+ * `feed-check.js` can only see that our parse of URA is self-consistent, and
+ * would report a serene PASS while URA quietly stopped agreeing with the feed
+ * everyone else reads. Only a second opinion catches that, so the exit code is
+ * judged on coverage and agreement rather than left for someone to eyeball.
  */
+// URA legitimately runs a little behind the Unified feed and a bus that has just
+// passed its last stop drops out of one before the other, so exact parity is the
+// wrong bar. These are set well below the observed figures (99.4% coverage,
+// 99.5% route agreement) to catch a regime change, not ordinary drift.
+const MIN_COVERAGE = 0.8;
+const MIN_ROUTE_AGREEMENT = 0.95;
 const https = require('https');
 const zlib = require('zlib');
 
@@ -154,6 +166,31 @@ const kb = (n) => (n / 1024).toFixed(0) + ' KB';
   const sample = u.get(inBoth[0]);
   console.log('\nsample URA vehicle');
   console.log(' ', JSON.stringify(sample));
-  console.log('\nnote: URA carries stop coordinates inline, so the bus path needs no');
-  console.log('      33,000-entry stop index at all.');
+
+  // The verdict. Coverage is measured against Unified rather than against an
+  // absolute count so the check holds at 3am as well as at rush hour: both feeds
+  // shrink overnight together, and it is the gap between them that means
+  // anything.
+  const coverage = n.size > 0 ? u.size / n.size : 0;
+  const routeAgreement = inBoth.length > 0 ? sameLine / inBoth.length : 0;
+  const failures = [];
+  if (coverage < MIN_COVERAGE) {
+    failures.push(`URA carries ${(coverage * 100).toFixed(1)}% of the vehicles Unified does `
+      + `(floor ${MIN_COVERAGE * 100}%) — it is no longer seeing the whole network`);
+  }
+  if (routeAgreement < MIN_ROUTE_AGREEMENT) {
+    failures.push(`the two feeds agree on the route of ${(routeAgreement * 100).toFixed(1)}% of `
+      + `shared vehicles (floor ${MIN_ROUTE_AGREEMENT * 100}%) — suspect a field-order change`);
+  }
+
+  console.log('');
+  if (failures.length > 0) {
+    for (const reason of failures) {
+      console.error(`DRIFT: ${reason}`);
+    }
+    console.error('verdict: FAIL — buses have no other feed; see backend/DEPLOY.md.');
+    process.exit(1);
+  }
+  console.log(`verdict: PASS — ${(coverage * 100).toFixed(1)}% coverage, `
+    + `${(routeAgreement * 100).toFixed(1)}% route agreement.`);
 })().catch((e) => { console.error('probe failed:', e.message); process.exit(1); });

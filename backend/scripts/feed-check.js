@@ -1,20 +1,24 @@
 #!/usr/bin/env node
 /**
- * One soak sample against the deployed backend, judged rather than printed.
+ * One sample of the deployed bus feed, judged rather than printed.
  *
- *   METRICS_TOKEN=… node scripts/soak-check.js [--json] [--url https://…]
+ *   METRICS_TOKEN=… node scripts/feed-check.js [--json] [--url https://…]
  *
- * Written for the URA bus-feed migration: the question a sample has to answer is
- * not "what are the numbers" but "is this still safe to leave running". So every
- * check carries its own verdict and the process exits non-zero if any of them
- * fail, which is what makes it usable from a timer.
+ * Written for the URA migration while it was on trial, and kept afterwards
+ * because removing the Unified path made it matter more, not less. The question
+ * a sample answers is not "what are the numbers" but "is this still safe to
+ * leave running", so every check carries its own verdict and the process exits
+ * non-zero if any of them fail — which is what makes it usable from a timer.
  *
- * Three of these are abort signals rather than things to tune — a changed feed
- * shape, a frozen feed, or a fleet that has collapsed. They are marked as such,
- * and they are the reason this exists instead of a dashboard nobody reads at
- * 3am.
+ * Three are abort signals rather than things to tune: a changed feed shape, a
+ * frozen feed, or a fleet that has collapsed. They are marked as such, and they
+ * are the reason this exists instead of a dashboard nobody reads at 3am.
+ *
+ * There is no longer a `BUS_FEED_SOURCE=unified` to fall back to, so an abort
+ * here is an incident and not a toggle. What it buys is the hours between the
+ * feed going wrong and someone noticing the map is quietly a lie.
  */
-const DEFAULT_URL = 'https://watch-london-move-production.up.railway.app';
+const DEFAULT_URL = 'https://api.watchlondonmove.maybeitssoftware.co.uk';
 
 const args = process.argv.slice(2);
 const asJson = args.includes('--json');
@@ -69,11 +73,13 @@ async function main() {
   // parser refuses — but a refusal that nobody notices is just an outage.
   checks.push(
     feed.unknownRows === null || feed.unknownRows === undefined
-      ? check('feed shape', WARN, 'no URA stats yet (source may be unified)')
+      ? check('feed shape', WARN, 'no URA stats yet — no completed poll since the last restart')
       : feed.unknownRows === 0
         ? check('feed shape', PASS, '0 unrecognised rows')
         : check('feed shape', FAIL, `${feed.unknownRows} unrecognised rows`,
-            'ABORT: TfL has changed the response shape. Set BUS_FEED_SOURCE=unified.'),
+            'ABORT: TfL has changed the response shape, and there is no second bus '
+            + 'feed to switch to. Re-run scripts/ura-probe.js and fix the field list '
+            + 'in src/ura-feed.js — the order there is the contract.'),
   );
 
   // Measured at fetch time by the server, not derived here from the last poll's
@@ -117,8 +123,8 @@ async function main() {
   const dropped = feed.dropped ?? {};
   const droppedTotal = Object.values(dropped).reduce((sum, n) => sum + (n || 0), 0);
   // Proportional, not absolute. TfL reliably serves about one malformed row per
-  // hundred thousand — a null stop code — and warning on that every 40 minutes
-  // would turn this check into wallpaper. What matters is a trend.
+  // hundred thousand — a null stop code — and warning on that every run would
+  // turn this check into wallpaper. What matters is a trend.
   const dropRate = feed.rows > 0 ? droppedTotal / feed.rows : 0;
   checks.push(
     droppedTotal === 0
@@ -129,8 +135,9 @@ async function main() {
             'Above the usual noise floor; the feed may be changing under us.'),
   );
 
-  // The headline win. If this is not far below the Unified baseline of ~49s,
-  // the migration is not doing what it was for.
+  // The headline win of the migration, and now a bellwether: the Unified feed
+  // took ~49s on this same deployment, so a URA poll drifting up toward that is
+  // the feed degrading rather than a cost worth paying.
   checks.push(
     m.lastPollLatencyMs < 15000
       ? check('poll latency', PASS, `${m.lastPollLatencyMs}ms`)
@@ -186,7 +193,7 @@ async function main() {
     console.log(JSON.stringify({ at: new Date().toISOString(), verdict: worst, wakeMs, source: feed.source, checks }, null, 2));
   } else {
     const mark = { pass: '  ok  ', warn: ' warn ', fail: ' FAIL ' };
-    console.log(`soak ${new Date().toISOString()}  source=${feed.source ?? '?'}  wake=${wakeMs}ms`);
+    console.log(`feed ${new Date().toISOString()}  source=${feed.source ?? '?'}  wake=${wakeMs}ms`);
     for (const c of checks) {
       console.log(`${mark[c.verdict]} ${c.name.padEnd(16)} ${c.detail}`);
       if (c.why) console.log(`       ${' '.repeat(16)} ${c.why}`);
@@ -198,6 +205,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('soak check failed:', error.message);
+  console.error('feed check failed:', error.message);
   process.exit(1);
 });
