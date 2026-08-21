@@ -1,0 +1,60 @@
+name: Soak
+
+# Watches the deployed backend while the URA bus feed is on trial.
+#
+# This is deliberately a scheduled workflow rather than a dashboard: the failure
+# modes that matter here are silent. A changed feed shape, a frozen upstream, or
+# a collapsed fleet all leave the service answering 200 and the map moving, so
+# something has to look on a timer and go red when it should.
+#
+# Delete this workflow once the Unified bus path is removed and the migration is
+# no longer on trial — a permanently-amber check trains everyone to ignore it.
+on:
+  schedule:
+    # Every 40 minutes. Off the hour deliberately: :00 is where every scheduled
+    # workflow on GitHub piles up, and the sample is no better for landing there.
+    - cron: '13,53 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Soak check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Sample the deployed backend
+        id: sample
+        env:
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+        run: |
+          if [ -z "$METRICS_TOKEN" ]; then
+            echo "::warning::METRICS_TOKEN is not set; /health reports liveness only and there is nothing to check."
+            exit 0
+          fi
+          # The script exits non-zero only on an abort signal — a changed feed
+          # shape, a frozen clock, or a collapsed fleet. Warnings pass.
+          node backend/scripts/soak-check.js | tee sample.txt
+        continue-on-error: true
+
+      - name: Publish the sample
+        run: |
+          {
+            echo '### Soak sample'
+            echo '```'
+            cat sample.txt 2>/dev/null || echo 'no sample captured'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on an abort signal
+        if: steps.sample.outcome == 'failure'
+        run: |
+          echo "::error::Soak check reported an abort signal. Roll back with BUS_FEED_SOURCE=unified on Railway, then investigate."
+          exit 1
