@@ -141,8 +141,9 @@ and prune behaviour of the state store, the rate limiter, and station
 name canonicalisation. These run in CI on every push and pull request,
 and gate the release and deploy pipelines.
 
-The frontend has no test suite; `npm run build` typechecks it (`tsc -b`)
-and `npm run lint` is oxlint.
+The frontend has no test suite; `npm run build` typechecks it (`tsc -b`).
+Both packages lint with oxlint — `npm run lint` at the root runs each in
+turn — and both CI gates run it alongside the tests.
 
 ## Local development
 

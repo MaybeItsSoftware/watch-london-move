@@ -6,7 +6,7 @@
     "dev": "./dev.sh",
     "build": "npm run build --prefix frontend",
     "store": "node scripts/store-assets/build.mjs",
-    "lint": "npm run lint --prefix frontend",
+    "lint": "npm run lint --prefix backend && npm run lint --prefix frontend",
     "typecheck": "npm run typecheck --prefix frontend",
     "smoke": "npm run smoke --prefix backend",
     "ci": "npm test && npm run lint && npm run build",

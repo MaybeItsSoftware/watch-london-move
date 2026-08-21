@@ -62,7 +62,9 @@ class RateLimiter {
    */
   sweep() {
     const now = Date.now();
-    for (const key of [...this.buckets.keys()]) {
+    // Deleting the entry the iterator is standing on is well-defined for a Map,
+    // so this does not need a snapshot of the keys first.
+    for (const key of this.buckets.keys()) {
       if (this.peek(key, now) >= this.capacity) {
         this.buckets.delete(key);
       }

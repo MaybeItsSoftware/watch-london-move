@@ -11,7 +11,7 @@ internal → manual promotion to the stores.**
    `feat:` → minor, `feat!:`/`BREAKING CHANGE:` → major; `docs:`/`chore:`/etc.
    release nothing.
 2. **Push/merge to `master`.** The **Release** workflow runs the repo checks
-   (backend smoke, frontend lint + build), then `semantic-release`:
+   (backend lint + tests, frontend lint + build), then `semantic-release`:
    - computes the next version from the commits since the last `vX.Y.Z` tag,
    - runs `scripts/set-app-version.sh`, which syncs the version into
      `frontend/package.json`, the iOS project (`MARKETING_VERSION` /

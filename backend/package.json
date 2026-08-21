@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
+    "lint": "oxlint",
     "test": "node --test \"test/**/*.test.js\"",
     "smoke": "node -e \"const {validateTuple}=require('./src/schema'); const ok=[['a',0,'1',1,1,0,0,null,[]],['a',0,'1',1,1,0,0,30,[51.5,-0.1,90,51.6,-0.2,150]]]; const bad=[['a',0,'1',1,1,0,0,30],['a',0,'1',1,1,0,0,30,null],['a',0,'1',1,1,0,0,30,[51.5,-0.1]],['a',0,'1',1,1,0,0,30,[51.5,-0.1,NaN]]]; if(!ok.every(validateTuple)||bad.some(validateTuple)) process.exit(1); console.log('schema smoke ok')\"",
     "smoke:server": "node scripts/smoke.js"
@@ -25,6 +26,7 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "oxlint": "^1.79.0",
     "socket.io-client": "^4.8.3"
   }
 }

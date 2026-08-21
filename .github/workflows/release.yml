@@ -21,8 +21,8 @@ jobs:
             backend/package-lock.json
             frontend/package-lock.json
 
-      - name: Backend tests
-        run: npm ci && npm test
+      - name: Backend lint + tests
+        run: npm ci && npm run lint && npm test
         working-directory: backend
 
       - name: Frontend lint + build
