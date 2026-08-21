@@ -115,6 +115,24 @@ module.exports = {
   trainCacheWindowMs: Number(process.env.TRAIN_CACHE_WINDOW_MS || 10000),
   // The whole-network feed takes ~10s to transfer, well past the default timeout.
   busFeedTimeoutMs: Number(process.env.BUS_FEED_TIMEOUT_MS || 60000),
+  // --- Bus source ---
+  // 'ura' | 'unified'. TfL's Countdown/URA interface serves the same predictions
+  // as /Mode/bus/Arrivals for a fraction of the cost — measured on the whole
+  // network, 2.07MB on the wire against 8.07MB, and 12MB to parse against 90MB,
+  // with identical route coverage. It is also a 2012 interface TfL no longer
+  // documents, so 'unified' stays one restart away.
+  busFeedSource: process.env.BUS_FEED_SOURCE === 'unified' ? 'unified' : 'ura',
+  uraBaseUrl: process.env.URA_BASE_URL || 'https://countdown.api.tfl.gov.uk',
+  // Charing Cross and a wide radius. The furthest stop in the network is 34.8km
+  // out, and row counts are identical from 40km up to 500km, so the margin costs
+  // nothing — but malformed geometry answers 416, so it is not unbounded.
+  uraCircle: process.env.URA_CIRCLE || '51.5072,-0.1276,60000',
+  uraTimeoutMs: Number(process.env.URA_TIMEOUT_MS || 30000),
+  // A response smaller than this fraction of the previous one is treated as a
+  // failure rather than cached. URA answers 200 with only a header row when it
+  // has nothing, and a field-mapping mistake makes every row fail the naptan
+  // guard — both blank the map without throwing.
+  busFeedMinRetainedFraction: Number(process.env.BUS_FEED_MIN_RETAINED_FRACTION || 0.2),
   // TfL accepts comma-separated line ids on /Line/{ids}/Arrivals, but 404s the
   // whole request if any one id is bad — so batch in small groups to keep both
   // the request count and the blast radius of a bad id low.

@@ -10,6 +10,7 @@ const { chain } = require('stream-chain');
 const { parser } = require('stream-json');
 const { streamArray } = require('stream-json/streamers/stream-array.js');
 const { canonicalizeStationName } = require('./canonicalization');
+const { createUraRowReader, uraRequestUrl } = require('./ura-feed');
 const { vehicleTypeForLine } = require('./lines');
 
 const logger = pino({ name: 'tfl-client' });
@@ -58,6 +59,26 @@ class TflClient {
         ...(config.tflAppKey ? { app_key: config.tflAppKey } : {}),
       },
     });
+
+    // A second client, because URA rejects the credentials the Unified API
+    // requires: any request carrying app_id/app_key answers HTTP 400. Verified
+    // live — without a key 200, with one 400. Since TFL_APP_KEY is unset on a
+    // laptop and set in production, sharing `this.http` would pass every local
+    // test and fail only once deployed.
+    this.uraHttp = axios.create({
+      baseURL: this.config.uraBaseUrl,
+      timeout: this.config.uraTimeoutMs,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      headers: {
+        // URA is undocumented and unauthenticated, so this is the only way TfL
+        // can attribute the traffic or get in touch about it.
+        'User-Agent': 'watch-london-move (+https://github.com/MaybeItsSoftware/watch-london-move)',
+      },
+    });
+    /** Feed clock from the last URA header row, for skew reporting. */
+    this.uraFeedClockMs = null;
+    this.uraStats = null;
 
     this.cache = {
       bus: { at: 0, data: [], failedLines: [] },
@@ -384,6 +405,12 @@ class TflClient {
    * roughly then, not as of when the last byte landed.
    */
   static expectedArrivalMs(item, fetchedAtMs) {
+    // URA reports an absolute epoch instant, so there is nothing to triangulate
+    // and no clock skew to reason about. The Unified feed has no such field, so
+    // rail and the old bus path fall through to the logic below unchanged.
+    if (Number.isFinite(item.expectedArrivalMs)) {
+      return item.expectedArrivalMs;
+    }
     const ttlMs = Number.isFinite(item.timeToStation) ? item.timeToStation * 1000 : null;
     const derived = ttlMs === null ? null : fetchedAtMs + ttlMs;
 
@@ -517,10 +544,27 @@ class TflClient {
     return accumulator.finish();
   }
 
+  // How far past due every one of a vehicle's predictions may be before the
+  // vehicle is dropped rather than placed.
+  static get ALL_EXPIRED_GRACE_MS() {
+    return 180000;
+  }
+
   static selectSchedules(byVehicle, nowMs, scheduleStops) {
     const results = [];
     for (const rows of byVehicle.values()) {
       rows.sort((a, b) => TflClient.compareArrivals(a, b, nowMs));
+
+      // When every prediction has expired, compareArrivals falls through to
+      // "the latest one is the furthest along" — a sensible last-known-position
+      // guess under the Unified feed, which serves predictions ~70s stale. Under
+      // URA it is a trap: URA drops passed stops at source, so if nothing is left
+      // in the future the data is junk, and that branch would send every vehicle
+      // to the far end of its route at once. Drop them and let prune reclaim.
+      const soonest = rows[0].dueAt;
+      if (Number.isFinite(soonest) && soonest < nowMs - TflClient.ALL_EXPIRED_GRACE_MS) {
+        continue;
+      }
 
       const schedule = [rows[0].item];
       const seen = new Set([rows[0].item.naptanId]);
@@ -545,6 +589,29 @@ class TflClient {
     }
 
     return results;
+  }
+
+  /**
+   * What the bus feed did last cycle. The single lastPollVehicles total cannot
+   * show a bus-side regression while rail is healthy, and the whole point of the
+   * soak is to notice one.
+   */
+  busFeedStats() {
+    const ageMs = this.cache.bus.at > 0 ? Date.now() - this.cache.bus.at : null;
+    return {
+      source: this.config.busFeedSource,
+      vehicles: this.cache.bus.data.length,
+      ageMs,
+      // Our clock minus URA's own. A skew that grows rather than jitters means a
+      // frozen feed whose predictions all still look like the future.
+      clockSkewMs: this.uraFeedClockMs === null ? null : Date.now() - this.uraFeedClockMs,
+      rows: this.uraStats?.arrivals ?? null,
+      dropped: this.uraStats?.dropped ?? null,
+      // Non-zero means TfL changed the response shape. That is an abort signal,
+      // not a tuning one.
+      unknownRows: this.uraStats?.unknownRows ?? null,
+      lineNames: new Set(this.cache.bus.data.map((v) => v.line_name)).size,
+    };
   }
 
   getFailedLines() {
@@ -664,10 +731,46 @@ class TflClient {
    * middle would not lose one stop, it would send the vehicle down the wrong leg
    * for the rest of the list.
    */
+  /**
+   * Where this arrival's stop is.
+   *
+   * The index wins over the feed's own coordinates, which is the opposite of what
+   * it looks like it should be. URA carries per-stop latitude and longitude inline
+   * and they are usually excellent — median deviation from TfL's surveyed index is
+   * 0.6m, p99 82m. But a handful are catastrophically wrong: two stops report a
+   * shared sentinel 30-45km from where they are, and that sentinel sits *inside*
+   * any sane London bounding box, so a plausibility filter cannot catch it. A bus
+   * routed through one would cross the map and back on every poll.
+   *
+   * So inline coordinates are the fallback for stops the index has never heard of,
+   * not the primary. The Unified feed carries no coordinates at all, so its rows
+   * always take the index path and rail is unaffected.
+   */
+  static stopFor(item, stopPoints) {
+    const indexed = stopPoints?.get(item.naptanId);
+    if (indexed) {
+      return indexed;
+    }
+    if (Number.isFinite(item.lat) && Number.isFinite(item.lon)) {
+      return { lat: item.lat, lon: item.lon, name: item.stationName || '' };
+    }
+    return null;
+  }
+
   static buildSchedule(items, stopPoints, fetchedAtMs, formatName = (name) => name) {
     const schedule = [];
+    // Rows for the same vehicle can span both directions of a route — 19.7% of
+    // vehicles, and 4.5% within the first three arrivals, which is exactly what
+    // scheduleStops slices. The return-journey stops have later times, so they
+    // pass the increasing-time and duplicate-stop guards and get appended, giving
+    // the client a leg queue that runs to the terminus and then teleports back
+    // down the outbound route. Anchor on the first row's direction instead.
+    const direction = items[0]?.directionId ?? null;
     for (const item of items) {
-      const stop = stopPoints.get(item.naptanId);
+      if (direction !== null && (item.directionId ?? null) !== direction) {
+        break;
+      }
+      const stop = TflClient.stopFor(item, stopPoints);
       const dueAtMs = TflClient.expectedArrivalMs(item, fetchedAtMs);
       if (!stop || !Number.isFinite(dueAtMs)) {
         break;
@@ -688,12 +791,22 @@ class TflClient {
   }
 
   static busVehicle(item, lineId, stopPoints, source, fetchedAtMs, schedule = [item]) {
-    const stop = stopPoints.get(item.naptanId);
+    const stop = TflClient.stopFor(item, stopPoints);
     if (!stop) {
       return null;
     }
+    // Never a position-derived id. The old fallback keyed on the stop, so a bus
+    // minted a fresh id every time it moved: the store treats that as a new
+    // vehicle plus a stale removal, leaving a trail of phantoms each living out
+    // staleVehicleMs. URA's own fleet number is always present when a
+    // registration is not, and a row with neither is not a vehicle we can track.
+    const identity = item.vehicleId
+      || (item.uraVehicleId !== null && item.uraVehicleId !== undefined ? `ura-${item.uraVehicleId}` : null);
+    if (!identity) {
+      return null;
+    }
     return {
-      id: `bus-${item.vehicleId || `${lineId}-${item.naptanId}`}`,
+      id: `bus-${identity}`,
       type: 'bus',
       line_name: item.lineName || lineId,
       lat: stop.lat,
@@ -820,13 +933,89 @@ class TflClient {
       .filter(Boolean);
   }
 
+  /**
+   * The whole network from URA, reduced row by row.
+   *
+   * Rejects rather than returning a partial fleet: the caller caches whatever
+   * this resolves with, so half a fleet would be cached as though it were real
+   * and then served until it aged out.
+   */
+  async fetchUraBusArrivals(stopPoints, fetchedAtMs) {
+    const response = await this.uraHttp.get(uraRequestUrl(this.config), {
+      responseType: 'stream',
+      // axios' own timeout covers the response headers, not a body that stalls
+      // part-way through; this bounds the whole read.
+      signal: AbortSignal.timeout(this.config.uraTimeoutMs),
+    });
+
+    const accumulator = TflClient.arrivalAccumulator(fetchedAtMs, this.config.scheduleStops);
+    const reader = createUraRowReader({
+      onArrival: (arrival) => accumulator.add(arrival),
+      onHeader: (clockMs) => { this.uraFeedClockMs = clockMs; },
+    });
+
+    await new Promise((resolve, reject) => {
+      response.data.on('data', (chunk) => {
+        try {
+          reader.push(chunk);
+        } catch (error) {
+          response.data.destroy();
+          reject(error);
+        }
+      });
+      response.data.on('end', resolve);
+      response.data.on('error', reject);
+    });
+    this.uraStats = reader.end();
+
+    return accumulator
+      .finish()
+      .map(({ item, schedule }) =>
+        TflClient.busVehicle(item, item.lineName, stopPoints, 'tfl-ura', fetchedAtMs, schedule),
+      )
+      .filter(Boolean);
+  }
+
   async fetchBusArrivals() {
     const now = Date.now();
     if (now - this.cache.bus.at < this.config.busCacheWindowMs) {
+      // A feed that has been failing for longer than a vehicle's stale window has
+      // nothing worth serving. Returning the cached array instead would restamp
+      // last_seen_at on every record in upsertVehicles, so prune could never fire
+      // and the map would show a frozen fleet indefinitely with nothing raised.
+      if (this.cache.bus.at > 0 && now - this.cache.bus.at > this.config.staleVehicleMs) {
+        return [];
+      }
       return this.cache.bus.data;
     }
 
     const stopPoints = await this.ensureStopPoints();
+
+    if (this.config.busFeedSource === 'ura') {
+      try {
+        const vehicles = await this.fetchUraBusArrivals(stopPoints, now);
+        const previous = this.cache.bus.data.length;
+        const floor = Math.floor(previous * this.config.busFeedMinRetainedFraction);
+        if (vehicles.length === 0 || (previous > 0 && vehicles.length < floor)) {
+          // A 200 carrying nothing usable is not success. URA answers with only a
+          // header row when it has no data, and a field-mapping slip makes every
+          // row fail the naptan guard — neither throws, so without this the map
+          // blanks and the empty result is cached as truth.
+          logger.warn(
+            { vehicles: vehicles.length, previous },
+            'URA returned an implausibly small fleet; keeping previous snapshot',
+          );
+          this.cache.bus.failedLines = ['bus (ura, implausible)'];
+          return this.cache.bus.data;
+        }
+        this.cache.bus = { at: now, data: vehicles, failedLines: [] };
+        return vehicles;
+      } catch (error) {
+        logger.warn({ err: error.message }, 'URA bus arrivals failed; keeping previous snapshot');
+        this.cache.bus.failedLines = ['bus (ura)'];
+        return this.cache.bus.data;
+      }
+    }
 
     if (this.config.allBusLines) {
       try {

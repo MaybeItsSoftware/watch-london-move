@@ -96,6 +96,40 @@ driven service can. Four things address that, in descending order of effect:
    without it every deploy rebuilds route geometry from the TfL API, which is
    ~7 minutes and several thousand requests, every time.
 
+## The bus feed
+
+Buses come from TfL's Countdown/URA interface
+(`countdown.api.tfl.gov.uk/interfaces/ura/instant_V1`), not from the Unified API's
+`/Mode/bus/Arrivals`. Both carry the same predictions — 99.5% of matched
+(vehicle, stop) pairs agree exactly — but URA lets the caller name the fields it
+wants rather than returning 22 keys per row:
+
+| | Unified | URA |
+|---|---|---|
+| Wire | 8.07 MB | **2.07 MB** |
+| Parsed | ~90 MB | **~12 MB** |
+| Fetch | 4-11 s | **~1.2 s** |
+| Vehicles | 6,043 | 6,004 |
+
+Three things about it are worth knowing before touching that code:
+
+1. **URA rejects TfL API credentials.** A request carrying `app_id`/`app_key`
+   answers HTTP 400. It therefore has its own HTTP client with no default params —
+   sharing the Unified one would pass every local test, where `TFL_APP_KEY` is
+   unset, and fail only in production.
+2. **URA answers in its own field order**, ignoring the order `ReturnList` asks
+   in. `src/ura-feed.js` derives both the request and the parse from one ordered
+   list for that reason, and asserts the response's column count and plausibility
+   on every fetch. A transposition would not throw on its own — it would put
+   longitude into the line name and keep running.
+3. **It is a 2012 interface TfL no longer documents.** `BUS_FEED_SOURCE=unified`
+   is the rollback and both paths mint identical `bus-<registration>` ids, so
+   switching either way does not churn the fleet.
+   `node scripts/ura-probe.js` re-verifies coverage and agreement; run it
+   periodically.
+
+Rail is unaffected and still uses the Unified API per line.
+
 ## What keeps egress down
 
 Four things, all on by default. Each can be turned off to measure its effect.

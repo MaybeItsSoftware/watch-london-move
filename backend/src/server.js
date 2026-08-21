@@ -284,6 +284,7 @@ app.get('/health', httpRateLimit(limiters.http), (req, res) => {
     uptimeSec: Math.round(process.uptime()),
     metrics,
     busFeedWorker: tfl.busFeedWorkerState(),
+    busFeed: tfl.busFeedStats(),
     routeLinesLoaded: routeSequences.getLoadedLineCount(),
     routeLoadComplete: routeSequences.isComplete(),
     routeBuiltAt: routeSequences.getBuiltAt(),
