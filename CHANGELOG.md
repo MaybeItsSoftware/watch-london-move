@@ -1,3 +1,10 @@
+## [0.8.2](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.8.1...v0.8.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ios:** document why the Always location keys must stay ([7c9f558](https://github.com/MaybeItsSoftware/watch-london-move/commit/7c9f5583949c438d976b92603214bfa6e9be347b))
+
 ## [0.8.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.8.0...v0.8.1) (2026-09-26)
 
 
