@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated:** 3 September 2026
+**Last updated:** 26 September 2026
 
 This policy explains what happens to your information when you use **Watch London
 Move** — the website at `watchlondonmove.maybeitssoftware.co.uk` and the iOS and
@@ -79,6 +79,12 @@ Transport for London and relays them to you.
   have scrolled to. It is not your location, it is not derived from your
   location, and it is not stored — it is held in memory for the life of the
   connection and discarded when you disconnect.
+* **The stop you open.** Tapping a stop asks our server for its live arrivals,
+  so the request names that stop's TfL identifier. The server passes the
+  identifier on to TfL and keeps the answer for a few seconds so that other
+  people looking at the same stop share it. Neither the request nor who made it
+  is stored. The status of each line is fetched by the server once for everyone,
+  not per device.
 * **Your IP address, in the ordinary course of being connected.** Any server you
   connect to necessarily sees your IP address. We use it for one purpose: rate
   limiting, so that one client cannot exhaust a service whose costs are shared.
@@ -129,9 +135,9 @@ your IP address because your device connects to them directly.
 | **Railway** | Hosts the live-data backend. | <https://railway.com/legal/privacy> |
 | **Sentry** | Crash reporting, as above. | <https://sentry.io/privacy/> |
 
-Vehicle data comes from **Transport for London's** open data API. That is a
-request *we* make from our server, not one your device makes, so TfL does not see
-you. Powered by TfL Open Data.
+Vehicle positions, stop arrivals and line status come from **Transport for
+London's** open data API. Those are requests *we* make from our server, not ones
+your device makes, so TfL does not see you. Powered by TfL Open Data.
 
 If you installed from the App Store or Google Play, Apple or Google may collect
 information about the download under their own policies, which we do not control.
