@@ -25,10 +25,14 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<!-- Required by the "centre the map on my location" control. iOS terminates
-	     an app that asks for location without these keys present. Even though the app
-	     only uses location when in use, @capacitor/geolocation references CoreLocation
-	     symbols that trigger Apple's ITMS-90683 check for
-	     NSLocationAlwaysAndWhenInUseUsageDescription. -->
+	     an app that asks for location without these keys present. The app only ever
+	     requests when-in-use (GeolocationPlugin.swift asks for `.whenInUse`, one-shot
+	     getCurrentPosition, no UIBackgroundModes). But @capacitor/geolocation links
+	     IONGeolocationLib, whose IONGLOCAuthorisationRequestType.swift compiles in a
+	     call to CLLocationManager.requestAlwaysAuthorization; App Store Connect scans
+	     the binary for that symbol and rejects the upload (ITMS-90683) unless the
+	     Always keys are present. Keep them until that dependency drops the reference;
+	     they are never shown to the user because Always is never requested. -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Used only to centre the map on where you are. Your location is never stored or sent anywhere.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
