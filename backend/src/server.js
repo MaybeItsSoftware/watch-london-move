@@ -1000,9 +1000,15 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 (async () => {
   logger.info('Tracking every London bus route via the URA feed');
 
-  await pollAndUpdate();
-  scheduleNextPoll();
+  // Listen before the first poll, not after it. A cold stop index rebuilds
+  // from the TfL API in minutes when TfL throttles, which outlasts the
+  // platform's 5 minute health check window, so a deploy that waited for the
+  // poll was killed before /health ever answered. Clients that connect early
+  // get an empty fleet until the first poll lands, and /health reports
+  // feedStale until then.
   server.listen(config.port, () => {
     logger.info({ port: config.port, compression: config.compression }, 'Backend listening');
   });
+  await pollAndUpdate();
+  scheduleNextPoll();
 })();
