@@ -1,3 +1,16 @@
+# [0.8.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.7.1...v0.8.0) (2026-09-26)
+
+
+### Bug Fixes
+
+* **frontend:** open arrivals from map stops and keep them current ([c597a63](https://github.com/MaybeItsSoftware/watch-london-move/commit/c597a6319717f152dc80c1f7c6290793199f8d5d))
+* **frontend:** rank line status by its worst severity, via the backend ([5e5f273](https://github.com/MaybeItsSoftware/watch-london-move/commit/5e5f2737e7962809a6354424045fe0002bab529c))
+
+
+### Features
+
+* **backend:** proxy stop arrivals and line status from TfL ([b722118](https://github.com/MaybeItsSoftware/watch-london-move/commit/b7221181fa28e5e0791dc8b49a2ec91e1f1a2e5a))
+
 ## [0.7.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.7.0...v0.7.1) (2026-09-07)
 
 
