@@ -15,6 +15,7 @@ const { VEHICLE_SCHEMA, encodeAll, toDetail } = require('./schema');
 const { ALL_ROOM, roomForTile, tileKeysForBounds } = require('./tiles');
 const { RateLimiter, httpRateLimit, socketClientKey } = require('./rate-limit');
 const { pollDelayMs, shouldRefreshOnConnect } = require('./poll-schedule');
+const { LiveInfo, registerLiveInfoRoutes } = require('./live-info');
 
 const logger = pino({ name: 'watch-london-backend' });
 
@@ -124,6 +125,11 @@ const limiters = {
     capacity: config.rateLimit.detailsCapacity,
     refillPerSec: config.rateLimit.detailsRefillPerSec,
   }),
+  // Global, keyed by a constant: see registerLiveInfoRoutes.
+  tflUpstream: new RateLimiter({
+    capacity: config.rateLimit.tflUpstreamCapacity,
+    refillPerSec: config.rateLimit.tflUpstreamRefillPerSec,
+  }),
 };
 
 // Live socket count per address, so one client cannot buy itself more budget
@@ -133,6 +139,9 @@ const socketsByIp = new Map();
 const store = new StateStore(config.tileSizeDeg, config.arrivalRevisionMs);
 const tfl = new TflClient(config);
 const routeSequences = new RouteSequences(config, tfl);
+// One retry, short: a stop panel polls again in 15 s, so a request stuck in
+// backoff is worth less than a fast failure.
+const liveInfo = new LiveInfo({ fetchJson: (url) => tfl.getJsonWithRetry(url, 1, 500) });
 
 const metrics = {
   polls: 0,
@@ -585,6 +594,14 @@ app.get('/routes/version', httpRateLimit(limiters.http), (_req, res) => {
     lines: routeSequences.getLoadedLineCount(),
     etag: routeSequences.routeEtag(),
   });
+});
+
+// Stop arrivals and line status, proxied so the device never talks to TfL.
+registerLiveInfoRoutes(app, {
+  liveInfo,
+  clientLimit: httpRateLimit(limiters.http),
+  upstream: limiters.tflUpstream,
+  logger,
 });
 
 /**
