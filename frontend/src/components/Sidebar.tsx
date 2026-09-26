@@ -5,6 +5,7 @@ import type { FilterKey, LineSummary } from '../types';
 import type { LineStatusInfo } from '../line-status';
 import type { StopRecord } from '../stop-index';
 import { VIRTUALIZE_ABOVE_ROWS, rowWindow } from '../window-rows';
+import { StopMarker } from './StopMarker';
 
 const BASEMAP_MODES: { key: BasemapMode; label: string }[] = [
   { key: 'auto', label: 'Auto' },
@@ -226,6 +227,7 @@ export const Sidebar = memo(function Sidebar({
             onToggleFavoriteLine(line.id);
           }}
           aria-label={isFav ? `Unpin ${line.label}` : `Pin ${line.label}`}
+          aria-pressed={isFav}
           title={isFav ? 'Unpin route' : 'Pin route'}
         >
           ★
@@ -352,7 +354,7 @@ export const Sidebar = memo(function Sidebar({
                 className="search-stop-item"
                 onClick={() => onSelectStop(stop)}
               >
-                <span className="search-stop-icon" aria-hidden="true">🚏</span>
+                <StopMarker className="search-stop-icon" />
                 <span className="search-stop-name">{stop.name}</span>
               </button>
             ))}

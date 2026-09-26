@@ -35,6 +35,7 @@ import { useAndroidBack, useAppActive, useNativeShell } from './lifecycle';
 import { fetchLineStatuses, type LineStatusInfo } from './line-status';
 import { setRouteCollection } from './route-paths';
 import { loadStops, searchStops, startRouteGeometry } from './static-data';
+import { stopFeatureCollection, stopFromFeature } from './stop-layer';
 import type { StopRecord } from './stop-index';
 import { loadPrefs, savePrefs, type Prefs } from './prefs';
 import { parseUrlState, shareableUrl, writeUrlState, type UrlState } from './url-state';
@@ -498,7 +499,14 @@ function App() {
     };
   }, [search]);
 
+  const appActive = useAppActive();
+
+  // Paused while backgrounded — a poll nobody can see is battery and data for
+  // nothing — and refreshed on return, when the status most needs to be current.
   useEffect(() => {
+    if (!appActive) {
+      return;
+    }
     let cancelled = false;
     const update = async () => {
       const statuses = await fetchLineStatuses();
@@ -512,7 +520,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [appActive]);
 
   const handleVehicleRemoved = useCallback(
     (id: string) => {
@@ -660,13 +668,13 @@ function App() {
         return;
       }
       const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+      const stop = stopFromFeature(feature.properties, coords);
+      if (!stop) {
+        return;
+      }
       setSelectedId(null);
       setFollowing(false);
-      setSelectedStop({
-        id: String(feature.properties.id),
-        name: String(feature.properties.name),
-        coordinates: coords,
-      });
+      setSelectedStop(stop);
     });
 
     map.on('click', (event) => {
@@ -823,8 +831,6 @@ function App() {
     map.setStyle(next, { diff: false });
   }, [mapReady, phase]);
 
-  const appActive = useAppActive();
-
   // Re-check the sun on a timer and on resume: a phone backgrounded at dusk
   // comes back at night, and the timer will not have fired while it slept.
   useEffect(() => {
@@ -918,14 +924,7 @@ function App() {
         lastKey = '';
         return;
       }
-      source.setData({
-        type: 'FeatureCollection',
-        features: stops.map((stop) => ({
-          type: 'Feature',
-          properties: { name: stop.name },
-          geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
-        })),
-      });
+      source.setData(stopFeatureCollection(stops));
     };
 
     refresh();
@@ -1705,6 +1704,7 @@ function App() {
           stop={selectedStop}
           onClose={() => setSelectedStop(null)}
           onSelectLine={focusLineOnMap}
+          active={appActive}
         />
       ) : null}
       <StatusBar

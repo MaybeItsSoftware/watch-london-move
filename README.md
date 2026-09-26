@@ -17,7 +17,10 @@ current apps.
 - [`backend/`](backend/) — Express 5 + socket.io aggregator. Polls TfL,
   canonicalises vehicles into 9-element tuples with a string table,
   partitions them into geographic tiles, and emits full/delta payloads
-  per subscribed tile. Route geometry is built from TfL route sequences
+  per subscribed tile. It also proxies the two TfL lookups the app makes
+  on demand — `GET /stops/:id/arrivals` and `GET /line-status`
+  ([`live-info.js`](backend/src/live-info.js)) — so a device never talks
+  to TfL directly. Line status is cached once for every client. Route geometry is built from TfL route sequences
   and checkpointed to disk. Deploys to Railway from
   [`backend/railway.toml`](backend/railway.toml); see
   [`backend/DEPLOY.md`](backend/DEPLOY.md) for the cost model, the
@@ -146,15 +149,22 @@ build where the script was never run) it falls back to fetching
 
 ```sh
 cd backend && npm test      # node:test, no extra dependencies
+cd frontend && npm test     # vitest, in happy-dom
 ```
 
-Covers the pure logic the wire format depends on: tile bucketing and
-viewport resolution, tuple encoding and its validation gate, the delta
-and prune behaviour of the state store, the rate limiter, and station
-name canonicalisation. These run in CI on every push and pull request,
-and gate the release and deploy pipelines.
+The backend suite covers the pure logic the wire format depends on: tile
+bucketing and viewport resolution, tuple encoding and its validation gate,
+the delta and prune behaviour of the state store, the rate limiter, station
+name canonicalisation, and the stop-arrivals and line-status proxy (caching,
+input validation, and failure statuses, against a stubbed TfL).
 
-The frontend has no test suite; `npm run build` typechecks it (`tsc -b`).
+The frontend suite covers the URL-state codec, the preferences store,
+geolocation, the layer and row-windowing helpers, the stop index and stop
+layer, line-status severity mapping, and the stop arrivals panel.
+
+Both run in CI on every push and pull request and gate the release and
+deploy pipelines. `npm test` at the root runs both. `npm run typecheck` in
+`frontend/` (also part of `npm run build`) typechecks it with `tsc -b`.
 Both packages lint with oxlint — `npm run lint` at the root runs each in
 turn — and both CI gates run it alongside the tests.
 

@@ -272,6 +272,12 @@ module.exports = {
     // maxDetailIds per call.
     detailsCapacity: Number(process.env.RATE_DETAILS_CAPACITY || 20),
     detailsRefillPerSec: Number(process.env.RATE_DETAILS_REFILL || 2),
+    // One bucket for every client together, in front of TfL itself, for the
+    // stop-arrivals proxy. Per-client budgets cap an address; this caps what
+    // all of them can spend of the TfL key between them, which the vehicle
+    // poller needs first. 2/s is 120 a minute against the key's 500.
+    tflUpstreamCapacity: Number(process.env.RATE_TFL_UPSTREAM_CAPACITY || 20),
+    tflUpstreamRefillPerSec: Number(process.env.RATE_TFL_UPSTREAM_REFILL || 2),
   },
   isProduction,
   warnings,
