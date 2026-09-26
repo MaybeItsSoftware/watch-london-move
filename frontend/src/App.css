@@ -735,7 +735,8 @@ textarea {
 
 .timeline-stop.current .timeline-bullet {
   background: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
+  /* A hairline ring, not a glow: the bullet's own border in --bg forms the gap. */
+  outline: 1px solid var(--accent);
 }
 
 .timeline-name {
@@ -930,6 +931,9 @@ button.stop-arrival-row:focus-visible {
   height: 9px;
   border-radius: 50%;
   flex: none;
+  /* Live states get a hairline ring in their own hue (set below), offset so
+     the dot reads as ringed rather than simply larger. No glow: flat style. */
+  outline-offset: 1px;
 }
 
 /* Neutral, not red: the opening moment of a session is not a fault. */
@@ -939,17 +943,17 @@ button.stop-arrival-row:focus-visible {
 
 .status-dot.connected {
   background: var(--status-connected);
-  box-shadow: 0 0 6px var(--status-connected);
+  outline: 1px solid var(--status-connected);
 }
 
 .status-dot.reconnecting {
   background: var(--status-reconnecting);
-  box-shadow: 0 0 6px var(--status-reconnecting);
+  outline: 1px solid var(--status-reconnecting);
 }
 
 .status-dot.disconnected {
   background: var(--status-disconnected);
-  box-shadow: 0 0 6px var(--status-disconnected);
+  outline: 1px solid var(--status-disconnected);
 }
 
 .status-label {
