@@ -43,6 +43,11 @@ jobs:
       # every structural assertion still runs. The generous rate limits keep the
       # run from spending minutes waiting out its own token bucket — the limiter
       # itself is unit-tested in rate-limit.test.js.
+      #
+      # The server only listens after its first poll, and on a cold runner that
+      # poll fetches the stop index anonymously. TfL answers 429 to anonymous
+      # callers when it is busy, and the client backs off, so start-up can take
+      # well over a minute. The wait allows three.
       - name: Server smoke test
         env:
           PORT: '4010'
@@ -54,7 +59,7 @@ jobs:
           npm start &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          for i in $(seq 1 30); do
+          for i in $(seq 1 180); do
             curl -sf --max-time 2 "http://localhost:$PORT/health" >/dev/null && break
             if ! kill -0 "$SERVER_PID" 2>/dev/null; then
               echo "::error::backend exited during start-up"
