@@ -1,3 +1,10 @@
+## [0.8.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.8.0...v0.8.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **backend:** listen before the first poll so deploys pass the health check ([22fb9b5](https://github.com/MaybeItsSoftware/watch-london-move/commit/22fb9b5d5a9d51eeac976245bacf189a500d25a3))
+
 # [0.8.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.7.1...v0.8.0) (2026-09-26)
 
 
