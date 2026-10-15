@@ -1,0 +1,78 @@
+name: Tramline · iOS
+
+# Triggered by Tramline. Builds the Capacitor app at the version Tramline hands over,
+# signs it with match and uploads it to TestFlight (`fastlane ios tramline`).
+# Tramline then finds the build in App Store Connect by its build number.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tramline-input:
+        description: "JSON from Tramline (version_name, version_code, commit_ref, build_notes)"
+        required: false
+        default: "{}"
+
+concurrency:
+  group: tramline-ios-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Configure Tramline
+        id: tramline
+        uses: tramlinehq/deploy-action@v0.1.7
+        with:
+          input: ${{ github.event.inputs.tramline-input }}
+
+      - name: Require Tramline version
+        env:
+          VERSION_NAME: ${{ steps.tramline.outputs.version_name }}
+          VERSION_CODE: ${{ steps.tramline.outputs.version_code }}
+        run: |
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "::error::No version_name/version_code in tramline-input — this workflow is meant to be triggered by Tramline."; exit 1
+          fi
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Set up Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Load match-certs SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MATCH_GIT_SSH_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build & upload to TestFlight
+        run: bundle exec fastlane ios tramline version_name:"$VERSION_NAME" version_code:"$VERSION_CODE"
+        env:
+          VERSION_NAME: ${{ steps.tramline.outputs.version_name }}
+          VERSION_CODE: ${{ steps.tramline.outputs.version_code }}
+          # The Fastfile refuses to load without BUILD_NUMBER; keep it equal to Tramline's code.
+          BUILD_NUMBER: ${{ steps.tramline.outputs.version_code }}
+          # Same tag format as deploy.yml/web.yml (vX.Y.Z), so Sentry groups this build with
+          # the web release of the same version and its uploaded source maps.
+          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_RELEASE: v${{ steps.tramline.outputs.version_name }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          TEAM_ID: '6NQNU5YSC2'

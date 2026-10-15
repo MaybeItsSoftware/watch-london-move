@@ -1,0 +1,110 @@
+name: Tramline · Android
+
+# Triggered by Tramline. Builds the signed release AAB at the version Tramline hands over
+# (`fastlane android tramline`) and uploads it as a single artifact; Tramline pushes it to
+# Play itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tramline-input:
+        description: "JSON from Tramline (version_name, version_code, commit_ref, build_notes)"
+        required: false
+        default: "{}"
+
+concurrency:
+  group: tramline-android-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Configure Tramline
+        id: tramline
+        uses: tramlinehq/deploy-action@v0.1.7
+        with:
+          input: ${{ github.event.inputs.tramline-input }}
+
+      - name: Require Tramline version
+        env:
+          VERSION_NAME: ${{ steps.tramline.outputs.version_name }}
+          VERSION_CODE: ${{ steps.tramline.outputs.version_code }}
+        run: |
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "::error::No version_name/version_code in tramline-input — this workflow is meant to be triggered by Tramline."; exit 1
+          fi
+
+      - name: Set up Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Java
+        # Capacitor 8's Gradle plugin requires JDK 21.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # build.gradle falls back to DEBUG signing when key.properties is missing, so fail
+      # here rather than hand Tramline a debug-signed bundle.
+      - name: Decode signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for v in ANDROID_KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then echo "::error::Secret $v is not set"; exit 1; fi
+          done
+          KEYSTORE_PATH="$RUNNER_TEMP/upload-keystore.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          {
+            echo "storeFile=$KEYSTORE_PATH"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > frontend/android/key.properties
+
+      - name: Build signed AAB
+        run: bundle exec fastlane android tramline version_name:"$VERSION_NAME" version_code:"$VERSION_CODE"
+        env:
+          VERSION_NAME: ${{ steps.tramline.outputs.version_name }}
+          VERSION_CODE: ${{ steps.tramline.outputs.version_code }}
+          # The Fastfile refuses to load without BUILD_NUMBER; keep it equal to Tramline's code.
+          BUILD_NUMBER: ${{ steps.tramline.outputs.version_code }}
+          # Same tag format as deploy.yml/web.yml (vX.Y.Z) so Sentry matches the web release.
+          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_RELEASE: v${{ steps.tramline.outputs.version_name }}
+
+      - name: Verify bundle is release-signed
+        run: |
+          AAB=frontend/android/app/build/outputs/bundle/release/app-release.aab
+          test -f "$AAB" || { echo "::error::$AAB not found"; exit 1; }
+          # jarsigner exits 0 on an UNSIGNED jar ("jar is unsigned."), so check the text.
+          if ! jarsigner -verify "$AAB" 2>&1 | grep -q "^jar verified"; then
+            echo "::error::$AAB is not signed"; exit 1
+          fi
+          if jarsigner -verify -verbose -certs "$AAB" | grep -q "CN=Android Debug"; then
+            echo "::error::$AAB is debug-signed — refusing to hand it to Tramline"; exit 1
+          fi
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: watch-london-move-${{ steps.tramline.outputs.version_name }}-${{ steps.tramline.outputs.version_code }}
+          path: frontend/android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 7
+          if-no-files-found: error

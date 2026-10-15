@@ -19,6 +19,10 @@ if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
 }
 
+// Tramline (tramline-android.yml) passes -PversionName alongside -PbuildNumber;
+// without it the semantic-release value above stands.
+appVersionName = project.findProperty('versionName') ?: appVersionName
+
 android {
     // The store-facing applicationId follows the maybeitssoftware convention
     // (uk.co.…, like open-parliament); the code namespace predates it and is
