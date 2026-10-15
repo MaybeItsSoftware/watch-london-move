@@ -41,6 +41,16 @@ def sync_web(platform)
   sh("cd #{FRONTEND} && npm ci && npm run build && find dist -name '*.map' -delete && npx cap sync #{platform}")
 end
 
+# version_name:/version_code: as handed over by Tramline, validated so a bad
+# input fails here rather than as a cryptic xcodebuild or Play error.
+def tramline_version(options)
+  version_name = options[:version_name].to_s.sub(/\Av/, "")
+  version_code = options[:version_code].to_s
+  UI.user_error!("version_name must look like 1.2.3, got #{version_name.inspect}") unless version_name =~ /\A\d+(\.\d+){0,2}\z/
+  UI.user_error!("version_code must be a positive integer, got #{version_code.inspect}") unless version_code =~ /\A[1-9]\d*\z/
+  [version_name, version_code]
+end
+
 platform :ios do
   desc "Build a signed release IPA and upload it to TestFlight"
   lane :beta do
@@ -80,6 +90,65 @@ platform :ios do
       # MARKETING_VERSION is committed by semantic-release; the build number
       # comes from the CI run so every upload is unique.
       xcargs:           "CURRENT_PROJECT_VERSION=#{BUILD_NUMBER}",
+      export_options:   {
+        provisioningProfiles: { APP_ID => "match AppStore #{APP_ID}" },
+      },
+    )
+
+    upload_to_testflight(
+      api_key:                           api_key,
+      ipa:                               lane_context[SharedValues::IPA_OUTPUT_PATH],
+      skip_waiting_for_build_processing: true,
+    )
+  end
+
+  # Tramline-driven build (tramline-ios.yml). Same as :beta, but the version
+  # name and build number both come from Tramline instead of the pbxproj and
+  # the CI run number. Tramline then finds the build in App Store Connect by
+  # its build number. BUILD_NUMBER must still be set (to the same code) because
+  # the Fastfile refuses to load without it.
+  #
+  #   BUILD_NUMBER=42 bundle exec fastlane ios tramline version_name:1.2.3 version_code:42
+  desc "Tramline: build a signed IPA at the given version and upload it to TestFlight"
+  lane :tramline do |options|
+    version_name, version_code = tramline_version(options)
+
+    setup_ci
+
+    api_key = app_store_connect_api_key(
+      key_id:                ENV["ASC_KEY_ID"],
+      issuer_id:             ENV["ASC_ISSUER_ID"],
+      key_content:           ENV["ASC_KEY_CONTENT"],
+      is_key_content_base64: true,
+    )
+
+    match(
+      type:           "appstore",
+      app_identifier: APP_ID,
+      api_key:        api_key,
+      readonly:       true,
+    )
+
+    update_code_signing_settings(
+      path:                  File.join(FRONTEND, "ios", "App", "App.xcodeproj"),
+      use_automatic_signing: false,
+      team_id:               TEAM_ID,
+      code_sign_identity:    "Apple Distribution",
+      profile_name:          "match AppStore #{APP_ID}",
+      bundle_identifier:     APP_ID,
+      targets:               ["App"],
+    )
+
+    sync_web("ios")
+
+    build_app(
+      project:          File.join(FRONTEND, "ios", "App", "App.xcodeproj"),
+      scheme:           "App",
+      export_method:    "app-store",
+      output_directory: File.join(ROOT, "build", "ios"),
+      # Info.plist reads both of these, so CFBundleShortVersionString /
+      # CFBundleVersion follow Tramline without touching the pbxproj.
+      xcargs:           "MARKETING_VERSION=#{version_name} CURRENT_PROJECT_VERSION=#{version_code}",
       export_options:   {
         provisioningProfiles: { APP_ID => "match AppStore #{APP_ID}" },
       },
@@ -144,6 +213,20 @@ platform :android do
       skip_upload_images:      true,
       skip_upload_screenshots: true,
     )
+  end
+
+  # Tramline-driven build (tramline-android.yml): builds the signed AAB at the
+  # given version and stops there -- Tramline uploads it to Play itself.
+  #
+  #   BUILD_NUMBER=42 bundle exec fastlane android tramline version_name:1.2.3 version_code:42
+  desc "Tramline: build a signed release AAB at the given version (no upload)"
+  lane :tramline do |options|
+    version_name, version_code = tramline_version(options)
+
+    sync_web("android")
+
+    sh("cd #{File.join(FRONTEND, "android")} && ./gradlew bundleRelease " \
+       "-PbuildNumber=#{version_code} -PversionName=#{version_name.shellescape}")
   end
 
   desc "Promote the current internal-track build to production"
